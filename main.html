@@ -1,1 +1,51 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Notificação de Pagamento</title>
+</head>
+<body>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js"></script>
+    
+    <script>
+        // Configuração do Firebase
+        const firebaseConfig = {
+            apiKey: "AIzaSyAwZQEgYg1IaVb0ILdrz3Q5AIVD-o1qYO8",
+            authDomain: "appinternet-c3d9e.firebaseapp.com",
+            projectId: "appinternet-c3d9e",
+            storageBucket: "appinternet-c3d9e.appspot.com",
+            messagingSenderId: "1009045727093",
+            appId: "1:1009045727093:web:8167bcdf2e6839001a153c",
+            measurementId: "G-C3DE1KPY86"
+        };
+        
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        // Função para processar a notificação
+        async function processarNotificacao(json) {
+            try {
+                const resultado = JSON.parse(json);
+                const paymentId = resultado.id;
+                const statusPagamento = resultado.charges[0].status;
+
+                // Atualizar o Firestore com o status do pagamento
+                await db.collection("subscriptions").doc(paymentId).update({
+                    status_pagamento: statusPagamento
+                });
+
+                console.log("Status do pagamento atualizado com sucesso!");
+            } catch (error) {
+                console.error("Erro ao processar a notificação:", error);
+            }
+        }
+
+        // Exemplo de chamada com dados JSON (isso viria da notificação real)
+        const exemploJson = '{"id": "12345", "charges": [{"status": "PAGO"}]}';
+        processarNotificacao(exemploJson);
+    </script>
+</body>
+</html>
 
