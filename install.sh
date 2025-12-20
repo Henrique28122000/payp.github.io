@@ -23,7 +23,7 @@ fi
 # DEPENDENCIAS BASICAS
 # ============================
 apt update -y
-apt install -y curl ca-certificates flock
+apt install -y curl ca-certificates
 
 # ============================
 # NODE.JS
@@ -81,7 +81,7 @@ echo "🧪 Testando execução..."
 $NODE_BIN "$SCRIPT_NAME" || true
 
 # ============================
-# CRONTAB (ANTI DUPLICAÇÃO)
+# CRONTAB (ANTI DUPLA EXECUÇÃO)
 # ============================
 CRON="* * * * * /usr/bin/flock -n /tmp/netpulse.lock $NODE_BIN $APP_DIR/$SCRIPT_NAME >> $LOG_FILE 2>&1"
 
