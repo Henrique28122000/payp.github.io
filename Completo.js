@@ -15,15 +15,15 @@ process.on("unhandledRejection", err => {
 // ============================
 // CONFIG
 // ============================
-const GET_API = "https://paulohenriquedev.site/netpulse/get_nodes.php";
-const UPDATE_API = "https://paulohenriquedev.site/netpulse/update_node.php";
+const GET_API = "https://paulohenriquedev.site/netpulse/get_nodes_1.php";
+const UPDATE_API = "https://paulohenriquedev.site/netpulse/update_node_1.php";
 
 const TCP_PORTS = [80, 443, 22, 8080];
 const TIMEOUT_PING = 1200;
 const TIMEOUT_TCP = 1500;
 const RETRIES = 2;
 
-const CHECK_INTERVAL = 30_000;
+const CHECK_INTERVAL = 60_000;
 const isWindows = process.platform === "win32";
 
 // ============================
