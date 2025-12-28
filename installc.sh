@@ -2,8 +2,11 @@
 #!/bin/bash
 set -e
 
-APP_DIR="/opt/netpulse"
+# ─────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────
 APP_NAME="netpulse"
+APP_DIR="/opt/netpulse"
 JS_FILE="Completo.js"
 JS_URL="https://raw.githubusercontent.com/Henrique28122000/payp.github.io/refs/heads/main/Completo.js"
 CONFIG_FILE="$APP_DIR/config.json"
@@ -13,17 +16,25 @@ echo "🚀 Instalando Nexyra Link / NetPulse Monitor"
 sleep 1
 
 # ─────────────────────────────────────────
-# Atualiza sistema
+# CHECK ROOT
+# ─────────────────────────────────────────
+if [ "$EUID" -ne 0 ]; then
+  echo "❌ Execute como root"
+  exit 1
+fi
+
+# ─────────────────────────────────────────
+# UPDATE
 # ─────────────────────────────────────────
 apt update -y
 
 # ─────────────────────────────────────────
-# Dependências
+# DEPENDÊNCIAS
 # ─────────────────────────────────────────
-apt install -y curl wget sudo git jq
+apt install -y curl wget git jq sudo
 
 # ─────────────────────────────────────────
-# Node.js 20
+# NODE.JS 20
 # ─────────────────────────────────────────
 if ! command -v node >/dev/null 2>&1; then
   echo "📦 Instalando Node.js 20..."
@@ -32,19 +43,19 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 # ─────────────────────────────────────────
-# Diretório da aplicação
+# DIRETÓRIO
 # ─────────────────────────────────────────
 mkdir -p "$APP_DIR"
 cd "$APP_DIR"
 
 # ─────────────────────────────────────────
-# Baixa o monitor
+# BAIXA SCRIPT JS
 # ─────────────────────────────────────────
 echo "⬇️ Baixando monitor..."
 wget -q -O "$JS_FILE" "$JS_URL"
 
 # ─────────────────────────────────────────
-# Cria config.json
+# CONFIG.JSON
 # ─────────────────────────────────────────
 cat > "$CONFIG_FILE" <<EOF
 {
@@ -63,7 +74,7 @@ cat > "$CONFIG_FILE" <<EOF
 EOF
 
 # ─────────────────────────────────────────
-# Script START
+# START / STOP / LOGS
 # ─────────────────────────────────────────
 cat > start.sh <<'EOF'
 #!/bin/bash
@@ -71,18 +82,12 @@ systemctl start netpulse
 systemctl status netpulse --no-pager
 EOF
 
-# ─────────────────────────────────────────
-# Script STOP
-# ─────────────────────────────────────────
 cat > stop.sh <<'EOF'
 #!/bin/bash
 systemctl stop netpulse
-echo "⏹️ Nexyra Link parado"
+echo "⏹️ NetPulse parado"
 EOF
 
-# ─────────────────────────────────────────
-# Script LOGS
-# ─────────────────────────────────────────
 cat > logs.sh <<'EOF'
 #!/bin/bash
 journalctl -u netpulse -f
@@ -108,13 +113,13 @@ edit_interval() {
   read -p "Tempo em minutos: " min
   ms=$((min * 60000))
   jq ".check_interval_ms=$ms" "$CONFIG" > tmp && mv tmp "$CONFIG"
-  echo "✅ Intervalo atualizado para ${min} minuto(s)"
+  echo "✅ Intervalo atualizado"
   sleep 1
 }
 
 while true; do
   clear
-  echo "🖥️ Nexyra Link / Monitor"
+  echo "🖥️ Nexyra Link / NetPulse"
   echo "────────────────────────────"
   echo "1) ▶️ Iniciar monitor"
   echo "2) ⏹️ Parar monitor"
@@ -145,7 +150,7 @@ EOF
 chmod +x *.sh
 
 # ─────────────────────────────────────────
-# SYSTEMD SERVICE (CORRETO)
+# SYSTEMD SERVICE
 # ─────────────────────────────────────────
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -165,17 +170,24 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 EOF
 
+# ─────────────────────────────────────────
+# ATIVA + INICIA AUTOMATICAMENTE (SEM COMANDOS EXTRAS)
+# ─────────────────────────────────────────
 systemctl daemon-reload
+systemctl enable netpulse
+systemctl restart netpulse
 
 # ─────────────────────────────────────────
-# Menu automático no SSH
+# MENU AUTO NO SSH
 # ─────────────────────────────────────────
 if ! grep -q "menu.sh" ~/.bashrc; then
   echo "cd $APP_DIR && ./menu.sh" >> ~/.bashrc
 fi
 
 echo
-echo "✅ Instalação concluída com SUCESSO!"
+echo "✅ INSTALAÇÃO 100% CONCLUÍDA"
+echo "🚀 NetPulse já está RODANDO"
+echo "♻️ Ativado automaticamente no boot"
+echo "🔐 Controlado pelo systemd"
 echo "📂 Diretório: $APP_DIR"
-echo "⚙️ Serviço: netpulse"
-echo "🔁 Reinicie ou reconecte via SSH para abrir o menu"
+echo "🔁 Reabra o SSH para abrir o menu"
