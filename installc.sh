@@ -11,6 +11,7 @@ JS_FILE="Completo.js"
 JS_URL="https://raw.githubusercontent.com/Henrique28122000/payp.github.io/refs/heads/main/Completo.js"
 CONFIG_FILE="$APP_DIR/config.json"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
+MENU_CMD="/usr/local/bin/menu"
 
 echo "🚀 Instalando Nexyra Link / NetPulse Monitor"
 sleep 1
@@ -74,7 +75,7 @@ cat > "$CONFIG_FILE" <<EOF
 EOF
 
 # ─────────────────────────────────────────
-# START / STOP / LOGS
+# SCRIPTS AUXILIARES
 # ─────────────────────────────────────────
 cat > start.sh <<'EOF'
 #!/bin/bash
@@ -94,7 +95,7 @@ journalctl -u netpulse -f
 EOF
 
 # ─────────────────────────────────────────
-# MENU
+# MENU INTERATIVO
 # ─────────────────────────────────────────
 cat > menu.sh <<'EOF'
 #!/bin/bash
@@ -150,6 +151,12 @@ EOF
 chmod +x *.sh
 
 # ─────────────────────────────────────────
+# COMANDO GLOBAL: menu
+# ─────────────────────────────────────────
+ln -sf "$APP_DIR/menu.sh" "$MENU_CMD"
+chmod +x "$MENU_CMD"
+
+# ─────────────────────────────────────────
 # SYSTEMD SERVICE
 # ─────────────────────────────────────────
 cat > "$SERVICE_FILE" <<EOF
@@ -171,16 +178,16 @@ WantedBy=multi-user.target
 EOF
 
 # ─────────────────────────────────────────
-# ATIVA + INICIA AUTOMATICAMENTE (SEM COMANDOS EXTRAS)
+# ATIVA + INICIA AUTOMATICAMENTE
 # ─────────────────────────────────────────
 systemctl daemon-reload
 systemctl enable netpulse
 systemctl restart netpulse
 
 # ─────────────────────────────────────────
-# MENU AUTO NO SSH
+# MENU AUTOMÁTICO AO ENTRAR NO SSH
 # ─────────────────────────────────────────
-if ! grep -q "menu.sh" ~/.bashrc; then
+if ! grep -q "$APP_DIR/menu.sh" ~/.bashrc; then
   echo "cd $APP_DIR && ./menu.sh" >> ~/.bashrc
 fi
 
@@ -188,6 +195,9 @@ echo
 echo "✅ INSTALAÇÃO 100% CONCLUÍDA"
 echo "🚀 NetPulse já está RODANDO"
 echo "♻️ Ativado automaticamente no boot"
-echo "🔐 Controlado pelo systemd"
 echo "📂 Diretório: $APP_DIR"
-echo "🔁 Reabra o SSH para abrir o menu"
+echo
+echo "👉 Para abrir o menu a qualquer momento, digite:"
+echo "   🔹 menu"
+echo
+echo "🔁 Reabra o SSH para abrir o menu automaticamente"
