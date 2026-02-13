@@ -61,8 +61,8 @@ wget -q -O "$JS_FILE" "$JS_URL"
 cat > "$CONFIG_FILE" <<EOF
 {
   "apis": {
-    "get": "https://paulohenriquedev.site/netpulse/get_nodes_1.php",
-    "update": "https://paulohenriquedev.site/netpulse/update_node_1.php"
+    "get": "https://nexyra.myftp.biz/netpulse/get_nodes_1.php",
+    "update": "https://nexyra.myftp.biz/netpulse/update_node_1.php"
   },
   "check_interval_ms": 60000,
   "tcp_ports": [80, 443, 22, 8080],
