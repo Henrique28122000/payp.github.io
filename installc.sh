@@ -10,7 +10,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # ─────────────────────────────────────────
 # CONFIG
@@ -22,6 +22,13 @@ JS_URL="https://raw.githubusercontent.com/Henrique28122000/payp.github.io/refs/h
 CONFIG_FILE="$APP_DIR/config.json"
 SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 MENU_CMD="/usr/local/bin/nexyra"
+
+# ─────────────────────────────────────────
+# CRIA DIRETÓRIO PRIMEIRO (ANTES DO LOG)
+# ─────────────────────────────────────────
+echo -e "${BLUE}📂 Criando diretório $APP_DIR...${NC}"
+mkdir -p "$APP_DIR"
+
 LOG_FILE="$APP_DIR/install.log"
 
 # ─────────────────────────────────────────
@@ -110,39 +117,68 @@ else
 fi
 
 # ─────────────────────────────────────────
-# CRIA DIRETÓRIO
+# ENTRA NO DIRETÓRIO
 # ─────────────────────────────────────────
-log "📂 Criando diretório $APP_DIR..."
-mkdir -p "$APP_DIR"
 cd "$APP_DIR"
 
 # ─────────────────────────────────────────
 # BAIXA SCRIPT JS ATUALIZADO
 # ─────────────────────────────────────────
 log "⬇️ Baixando monitor multi-empresa..."
-wget -q -O "$JS_FILE" "$JS_URL" || {
-    # Fallback se URL falhar
+
+# Tenta baixar o script
+if wget -q -O "$JS_FILE" "$JS_URL"; then
+    log "✅ Script baixado com sucesso"
+else
     warning "⚠️ Falha no download, criando script básico..."
     cat > "$JS_FILE" <<'EOF'
 // Script básico de monitoramento
-console.log("Monitor Nexyra Link iniciado...");
-setInterval(() => {
-    console.log("Verificando...");
+console.log("🚀 Nexyra Link Monitor iniciado...");
+console.log("📡 Versão: 3.0.0");
+console.log("⏱️  Aguardando configuração...");
+
+const https = require('https');
+const { exec } = require('child_process');
+
+function checkServer(host) {
+    return new Promise((resolve) => {
+        exec(`ping -c 1 -W 2 ${host}`, (err) => {
+            resolve(!err);
+        });
+    });
+}
+
+setInterval(async () => {
+    console.log(`🔄 Verificando - ${new Date().toLocaleTimeString()}`);
+    
+    // Carrega configuração
+    const config = require('./config.json');
+    
+    // Aqui viria a lógica completa
+    console.log("📊 Aguardando configuração das APIs...");
+    
 }, 60000);
 EOF
-}
+    log "✅ Script básico criado"
+fi
 
 # ─────────────────────────────────────────
 # CRIA CONFIG.JSON ATUALIZADO
 # ─────────────────────────────────────────
 log "⚙️ Criando arquivo de configuração..."
+
+# Verifica se jq está instalado
+if ! command -v jq >/dev/null 2>&1; then
+    apt install -y jq >> "$LOG_FILE" 2>&1
+fi
+
 cat > "$CONFIG_FILE" <<EOF
 {
   "apis": {
-    "get_users": "https://nexyra.myftp.biz/netpulse/get_users_with_servers.php",
-    "get_nodes": "https://nexyra.myftp.biz/netpulse/get_nodes_1.php",
-    "update_node": "https://nexyra.myftp.biz/netpulse/update_node_1.php",
-    "update_server": "https://nexyra.myftp.biz/netpulse/update_server_status.php"
+    "get_users": "https://SEU-DOMINIO.com/api/get_users_with_servers.php",
+    "get_nodes": "https://SEU-DOMINIO.com/api/get_nodes.php",
+    "update_node": "https://SEU-DOMINIO.com/api/update_node.php",
+    "update_server": "https://SEU-DOMINIO.com/api/update_server_status.php"
   },
   "tcp_ports": [80, 443, 22, 21, 8080, 3306, 5432],
   "timeouts": {
@@ -155,6 +191,8 @@ cat > "$CONFIG_FILE" <<EOF
   "max_concurrent": 10
 }
 EOF
+
+log "✅ Configuração criada em $CONFIG_FILE"
 
 # ─────────────────────────────────────────
 # CRIA SCRIPTS AUXILIARES
@@ -219,7 +257,7 @@ echo "────────────────────────"
 systemctl status nexyra-link --no-pager
 echo ""
 echo "📡 Últimas 10 verificações:"
-journalctl -u nexyra-link -n 10 --no-pager | grep "Verificando\|Servidor"
+journalctl -u nexyra-link -n 10 --no-pager | grep "Verificando\|Servidor" || echo "Nenhuma verificação ainda"
 EOF
 
 # Script de edição de config
@@ -291,6 +329,7 @@ EOF
 
 # Dar permissão de execução
 chmod +x *.sh
+log "✅ Scripts auxiliares criados"
 
 # ─────────────────────────────────────────
 # CRIA MENU INTERATIVO AVANÇADO
@@ -407,18 +446,18 @@ view_stats() {
     # Uptime
     if [ -f "$APP_DIR/uptime.log" ]; then
         uptime=$(cat "$APP_DIR/uptime.log")
-        echo -e "Uptime: ${CYAN}$uptime${NC}"
+        echo -e "Iniciado em: ${CYAN}$uptime${NC}"
     fi
     
     # Últimas verificações
     echo ""
     echo -e "${YELLOW}Últimas 10 verificações:${NC}"
-    journalctl -u nexyra-link -n 10 --no-pager | grep "Verificando\|Servidor" | tail -5
+    journalctl -u nexyra-link -n 10 --no-pager | grep "Verificando\|Servidor\|✅\|❌" | tail -5 || echo "Nenhuma verificação ainda"
     
     # Erros recentes
     echo ""
     echo -e "${YELLOW}Erros recentes:${NC}"
-    journalctl -u nexyra-link -n 20 --no-pager | grep "❌\|⚠️" | tail -3
+    journalctl -u nexyra-link -n 20 --no-pager | grep "❌\|⚠️" | tail -3 || echo "Nenhum erro encontrado"
     
     echo ""
     read -p "Pressione Enter para continuar..."
@@ -487,6 +526,7 @@ done
 EOF
 
 chmod +x menu.sh
+log "✅ Menu interativo criado"
 
 # ─────────────────────────────────────────
 # CRIA COMANDO GLOBAL
@@ -494,6 +534,7 @@ chmod +x menu.sh
 log "🔗 Criando comando global 'nexyra'..."
 ln -sf "$APP_DIR/menu.sh" "$MENU_CMD"
 chmod +x "$MENU_CMD"
+log "✅ Comando 'nexyra' criado"
 
 # ─────────────────────────────────────────
 # CRIA ARQUIVO DE UPTIME
@@ -529,6 +570,8 @@ SyslogIdentifier=nexyra-link
 WantedBy=multi-user.target
 EOF
 
+log "✅ Serviço systemd criado"
+
 # ─────────────────────────────────────────
 # ATIVA E INICIA SERVIÇO
 # ─────────────────────────────────────────
@@ -536,6 +579,7 @@ log "🚀 Ativando e iniciando serviço..."
 systemctl daemon-reload
 systemctl enable nexyra-link >> "$LOG_FILE" 2>&1
 systemctl restart nexyra-link >> "$LOG_FILE" 2>&1
+log "✅ Serviço iniciado"
 
 # ─────────────────────────────────────────
 # CONFIGURA PARA ABRIR MENU NO SSH
@@ -548,6 +592,7 @@ if ! grep -q "$APP_DIR/menu.sh" /root/.bashrc; then
     echo "    clear" >> /root/.bashrc
     echo "    $APP_DIR/menu.sh" >> /root/.bashrc
     echo "fi" >> /root/.bashrc
+    log "✅ Configurado para abrir menu no SSH"
 fi
 
 # ─────────────────────────────────────────
@@ -564,7 +609,7 @@ else
 fi
 
 # ─────────────────────────────────────────
-# RESUMO FINAL
+# LIMPA O TERMINAL E MOSTRA RESUMO
 # ─────────────────────────────────────────
 clear
 echo -e "${GREEN}"
@@ -581,6 +626,7 @@ echo -e "📂 Diretório: ${YELLOW}$APP_DIR${NC}"
 echo -e "⚙️  Config: ${YELLOW}$CONFIG_FILE${NC}"
 echo -e "📦 Versão: ${YELLOW}3.0.0${NC}"
 echo -e "🖥️  Node: ${YELLOW}$(node -v)${NC}"
+echo -e "📝 Log: ${YELLOW}$LOG_FILE${NC}"
 echo ""
 echo -e "${GREEN}🚀 COMANDOS DISPONÍVEIS:${NC}"
 echo "──────────────────────────────"
@@ -592,8 +638,13 @@ echo -e "${YELLOW}📝 PRÓXIMOS PASSOS:${NC}"
 echo "──────────────────────────────"
 echo -e "1️⃣  Execute ${WHITE}nexyra${NC} para abrir o menu"
 echo -e "2️⃣  Configure as APIs no menu (opção 6)"
-echo -e "3️⃣  Teste as conexões (opção 12)"
-echo -e "4️⃣  Ajuste o intervalo de verificação (opção 7)"
+echo -e "3️⃣  Coloque suas URLs:"
+echo -e "    ${CYAN}https://SEU-DOMINIO.com/api/get_users_with_servers.php${NC}"
+echo -e "    ${CYAN}https://SEU-DOMINIO.com/api/get_nodes.php${NC}"
+echo -e "    ${CYAN}https://SEU-DOMINIO.com/api/update_node.php${NC}"
+echo -e "    ${CYAN}https://SEU-DOMINIO.com/api/update_server_status.php${NC}"
+echo -e "4️⃣  Teste as conexões (opção 12)"
+echo -e "5️⃣  Ajuste o intervalo de verificação (opção 7)"
 echo ""
 echo -e "${BLUE}🔗 ACESSO RÁPIDO:${NC}"
 echo "──────────────────────────────"
