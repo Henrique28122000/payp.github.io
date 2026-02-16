@@ -139,10 +139,10 @@ log "⚙️ Criando arquivo de configuração..."
 cat > "$CONFIG_FILE" <<EOF
 {
   "apis": {
-    "get_users": "https://SEU-DOMINIO.com/api/get_users_with_servers.php",
-    "get_nodes": "https://SEU-DOMINIO.com/api/get_nodes.php",
-    "update_node": "https://SEU-DOMINIO.com/api/update_node.php",
-    "update_server": "https://SEU-DOMINIO.com/api/update_server_status.php"
+    "get_users": "https://nexyra.myftp.biz/netpulse/get_users_with_servers.php",
+    "get_nodes": "https://nexyra.myftp.biz/netpulse/get_nodes_1.php",
+    "update_node": "https://nexyra.myftp.biz/netpulse/update_node_1.php",
+    "update_server": "https://nexyra.myftp.biz/netpulse/update_server_status.php"
   },
   "tcp_ports": [80, 443, 22, 21, 8080, 3306, 5432],
   "timeouts": {
