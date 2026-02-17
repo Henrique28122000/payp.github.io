@@ -24,17 +24,21 @@ SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 MENU_CMD="/usr/local/bin/nexyra"
 BACKUP_DIR="$APP_DIR/backups"
 LOG_DIR="$APP_DIR/logs"
-LOG_FILE="$LOG_DIR/install.log"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
+# URLs fixas dos endpoints
+GET_USERS_ENDPOINT="get_users_with_servers.php"
+GET_NODES_ENDPOINT="get_nodes_1.php"
+UPDATE_NODE_ENDPOINT="update_node_1.php"
+UPDATE_SERVER_ENDPOINT="update_server_status.php"
+
 # ─────────────────────────────────────────────────────────────
-# FUNÇÃO DE LOG (CORRIGIDA)
+# FUNÇÃO DE LOG
 # ─────────────────────────────────────────────────────────────
 log() {
     echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} $1"
 }
 
-# ─────────────────────────────────────────────────────────────
 error() {
     echo -e "${RED}[ERRO]${NC} $1"
     exit 1
@@ -42,6 +46,90 @@ error() {
 
 warning() {
     echo -e "${YELLOW}[AVISO]${NC} $1"
+}
+
+# ─────────────────────────────────────────────────────────────
+# FUNÇÃO PARA VALIDAR CHAVE DE INSTALAÇÃO
+# ─────────────────────────────────────────────────────────────
+validate_installation_key() {
+    clear
+    echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║      VALIDAÇÃO DE INSTALAÇÃO          ║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${YELLOW}Digite a chave de instalação:${NC}"
+    read -p "🔑 Chave: " INSTALL_KEY
+    
+    if [ -z "$INSTALL_KEY" ]; then
+        error "Chave não pode estar vazia"
+    fi
+    
+    echo ""
+    echo -e "${CYAN}📡 Validando chave...${NC}"
+    
+    # URL base para validação (altere para sua URL real)
+    BASE_URL="https://nexyra.myftp.biz/netpulse"
+    
+    # Valida a chave e obtém o link base
+    RESPONSE=$(curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"$INSTALL_KEY\"}" \
+        --max-time 10 \
+        "$BASE_URL/validate_key.php")
+    
+    # Verifica se a consulta foi bem sucedida
+    if [ $? -ne 0 ] || [ -z "$RESPONSE" ]; then
+        error "Falha ao conectar com o servidor"
+    fi
+    
+    # Extrai o status e o link base usando jq
+    STATUS=$(echo "$RESPONSE" | jq -r '.status // "error"')
+    
+    if [ "$STATUS" != "success" ]; then
+        MESSAGE=$(echo "$RESPONSE" | jq -r '.message // "Chave inválida"')
+        echo -e "${RED}❌ $MESSAGE${NC}"
+        error "Validação falhou"
+    fi
+    
+    # Extrai o link base
+    BASE_LINK=$(echo "$RESPONSE" | jq -r '.base_link // empty')
+    
+    if [ -z "$BASE_LINK" ]; then
+        error "Link base não encontrado na resposta"
+    fi
+    
+    # Remove barra no final se existir
+    BASE_LINK=$(echo "$BASE_LINK" | sed 's:/*$::')
+    
+    echo -e "${GREEN}✅ Chave validada com sucesso!${NC}"
+    echo ""
+    echo -e "${CYAN}📋 Link base: $BASE_LINK${NC}"
+    echo ""
+    
+    # Monta as URLs completas
+    GET_USERS_API="$BASE_LINK/$GET_USERS_ENDPOINT"
+    GET_NODES_API="$BASE_LINK/$GET_NODES_ENDPOINT"
+    UPDATE_NODE_API="$BASE_LINK/$UPDATE_NODE_ENDPOINT"
+    UPDATE_SERVER_API="$BASE_LINK/$UPDATE_SERVER_ENDPOINT"
+    
+    echo -e "${CYAN}📋 URLs configuradas:${NC}"
+    echo "  • GET Users: $GET_USERS_API"
+    echo "  • GET Nodes: $GET_NODES_API"
+    echo "  • UPDATE Node: $UPDATE_NODE_API"
+    echo "  • UPDATE Server: $UPDATE_SERVER_API"
+    echo ""
+    
+    # Testa rapidamente as URLs
+    echo -e "${YELLOW}🔍 Testando conexão com as APIs...${NC}"
+    
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$GET_USERS_API" 2>/dev/null || echo "000")
+    if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "401" ]; then
+        echo -e "  ✅ GET Users: $HTTP_CODE"
+    else
+        echo -e "  ⚠️  GET Users: $HTTP_CODE (possível erro)"
+    fi
+    
+    sleep 2
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -121,7 +209,7 @@ uninstall() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# CRIAR ARQUIVO JS (SIMPLIFICADO)
+# CRIAR ARQUIVO JS
 # ─────────────────────────────────────────────────────────────
 create_js_file() {
     cat > "$APP_DIR/$JS_FILE" <<'EOF'
@@ -129,7 +217,6 @@ const { exec } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
-const url = require("url");
 
 const config = JSON.parse(fs.readFileSync("./config.json", "utf8"));
 
@@ -198,7 +285,10 @@ async function checkServers() {
             
             const online = await ping(user.monitoring_ip);
             const now = new Date();
-            const lastUpdate = now.toISOString().slice(0,19).replace('T',' ');
+            
+            // Horário de Brasília (GMT-3)
+            const brasiliaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
+            const lastUpdate = brasiliaTime.toISOString().slice(0,19).replace('T',' ');
 
             await request(UPDATE_SERVER_API, {
                 uid: user.uid,
@@ -206,7 +296,7 @@ async function checkServers() {
                 last_update: lastUpdate
             }).catch(() => {});
             
-            console.log(`${online ? '✅' : '❌'} ${user.email} - ${user.monitoring_ip}`);
+            console.log(`${online ? '✅' : '❌'} ${user.email || user.uid} - ${user.monitoring_ip}`);
         }
     } catch (err) {
         console.log("❌ Erro em servidores:", err.message);
@@ -242,7 +332,7 @@ async function checkNodes() {
 }
 
 async function run() {
-    console.log(`\n🔄 Verificando - ${new Date().toLocaleTimeString()}`);
+    console.log(`\n🔄 Verificando - ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`);
     await checkServers();
     await checkNodes();
 }
@@ -259,10 +349,10 @@ create_config_file() {
     cat > "$CONFIG_FILE" <<EOF
 {
   "apis": {
-    "get_users": "https://nexyra.myftp.biz/netpulse/get_users_with_servers.php",
-    "get_nodes": "https://nexyra.myftp.biz/netpulse/get_nodes_1.php",
-    "update_node": "https://nexyra.myftp.biz/netpulse/update_node_1.php",
-    "update_server": "https://nexyra.myftp.biz/netpulse/update_server_status.php"
+    "get_users": "$GET_USERS_API",
+    "get_nodes": "$GET_NODES_API",
+    "update_node": "$UPDATE_NODE_API",
+    "update_server": "$UPDATE_SERVER_API"
   },
   "check_interval_ms": 30000
 }
@@ -350,8 +440,9 @@ while true; do
     echo "5) 📊  VER STATUS"
     echo "6) ⏱️  EDITAR INTERVALO"
     echo "7) 🔍  TESTAR APIs"
-    echo "8) 🚀  ATIVAR AUTO START"
-    echo "9) ❌  DESATIVAR AUTO START"
+    echo "8) 📋  VER CONFIGURAÇÃO"
+    echo "9) 🚀  ATIVAR AUTO START"
+    echo "10) ❌ DESATIVAR AUTO START"
     echo "0) 🚪  SAIR"
     echo ""
     echo "Status: $(systemctl is-active nexyra-link)"
@@ -379,12 +470,22 @@ while true; do
             ;;
         7) 
             GET_USERS=$(jq -r '.apis.get_users' "$APP_DIR/config.json")
-            echo "Testando APIs..."
-            curl -s -o /dev/null -w "GET Users: %{http_code}\n" --max-time 5 "$GET_USERS"
+            GET_NODES=$(jq -r '.apis.get_nodes' "$APP_DIR/config.json")
+            echo "🔍 Testando APIs..."
+            echo ""
+            echo "GET Users: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$GET_USERS")"
+            echo "GET Nodes: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$GET_NODES")"
             read -p "Enter..."
             ;;
-        8) systemctl enable nexyra-link && echo "✅ Auto start ativado" && sleep 2 ;;
-        9) systemctl disable nexyra-link && echo "❌ Auto start desativado" && sleep 2 ;;
+        8)
+            echo "📋 CONFIGURAÇÃO ATUAL:"
+            echo ""
+            jq '.' "$APP_DIR/config.json"
+            echo ""
+            read -p "Enter..."
+            ;;
+        9) systemctl enable nexyra-link && echo "✅ Auto start ativado" && sleep 2 ;;
+        10) systemctl disable nexyra-link && echo "❌ Auto start desativado" && sleep 2 ;;
         0) echo "Até logo!" && exit 0 ;;
         *) echo "Opção inválida" && sleep 2 ;;
     esac
@@ -399,6 +500,9 @@ EOF
 install() {
     clear
     echo -e "${BLUE}🚀 Iniciando instalação do Nexyra Link Monitor${NC}"
+    
+    # Valida a chave e obtém o link base
+    validate_installation_key
     
     clean_installation
     
@@ -473,6 +577,12 @@ EOF
     echo "📂 Diretório: $APP_DIR"
     echo "🚀 Serviço: ATIVO"
     echo "⏱️  Intervalo: 30 segundos"
+    echo ""
+    echo "📋 APIs configuradas:"
+    echo "  • GET Users: $GET_USERS_API"
+    echo "  • GET Nodes: $GET_NODES_API"
+    echo "  • UPDATE Node: $UPDATE_NODE_API"
+    echo "  • UPDATE Server: $UPDATE_SERVER_API"
     echo ""
     echo "👉 Digite 'nexyra' para começar!"
     echo ""
