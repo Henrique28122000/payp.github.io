@@ -51,7 +51,7 @@ warning() {
 # BANNER
 # ─────────────────────────────────────────
 clear
-echo -e "${BLUE}"
+echo -e "${PURPLE}"
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║                                                          ║"
 echo "║   ███╗   ██╗███████╗██╗  ██╗██╗   ██╗██████╗  █████╗   ║"
@@ -94,9 +94,9 @@ fi
 # ─────────────────────────────────────────
 # UPDATE SYSTEM
 # ─────────────────────────────────────────
-log "📦 Atualizando sistema..."
-apt update -y >> "$LOG_FILE" 2>&1 || warning "⚠️ Falha no apt update, continuando..."
-apt upgrade -y >> "$LOG_FILE" 2>&1 || warning "⚠️ Falha no apt upgrade, continuando..."
+#log "📦 Atualizando sistema..."
+#apt update -y >> "$LOG_FILE" 2>&1 || warning "⚠️ Falha no apt update, continuando..."
+#apt upgrade -y >> "$LOG_FILE" 2>&1 || warning "⚠️ Falha no apt upgrade, continuando..."
 
 # ─────────────────────────────────────────
 # INSTALA DEPENDÊNCIAS
