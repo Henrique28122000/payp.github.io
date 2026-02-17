@@ -49,7 +49,29 @@ warning() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# FUNÇÃO PARA VALIDAR CHAVE DE INSTALAÇÃO
+# FUNÇÃO PARA INSTALAR DEPENDÊNCIAS BÁSICAS
+# ─────────────────────────────────────────────────────────────
+install_basic_deps() {
+    echo -e "${BLUE}📦 Instalando dependências básicas...${NC}"
+    apt update -y > /dev/null 2>&1 || true
+    apt install -y curl wget jq > /dev/null 2>&1
+    
+    if ! command -v jq >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠️  jq não pôde ser instalado via apt, tentando instalar manualmente...${NC}"
+        curl -L -o /usr/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 2>/dev/null
+        chmod +x /usr/bin/jq
+    fi
+    
+    if command -v jq >/dev/null 2>&1; then
+        echo -e "${GREEN}✅ jq instalado com sucesso${NC}"
+    else
+        echo -e "${RED}❌ Falha ao instalar jq${NC}"
+        exit 1
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# FUNÇÃO PARA VALIDAR CHAVE DE INSTALAÇÃO (SEM USAR JQ)
 # ─────────────────────────────────────────────────────────────
 validate_installation_key() {
     clear
@@ -82,17 +104,37 @@ validate_installation_key() {
         error "Falha ao conectar com o servidor"
     fi
     
-    # Extrai o status e o link base usando jq
-    STATUS=$(echo "$RESPONSE" | jq -r '.status // "error"')
-    
-    if [ "$STATUS" != "success" ]; then
-        MESSAGE=$(echo "$RESPONSE" | jq -r '.message // "Chave inválida"')
-        echo -e "${RED}❌ $MESSAGE${NC}"
-        error "Validação falhou"
+    # Extrai o status e o link base usando grep/sed (fallback case)
+    if command -v jq >/dev/null 2>&1; then
+        # Usa jq se disponível
+        STATUS=$(echo "$RESPONSE" | jq -r '.status // "error"')
+        
+        if [ "$STATUS" != "success" ]; then
+            MESSAGE=$(echo "$RESPONSE" | jq -r '.message // "Chave inválida"')
+            echo -e "${RED}❌ $MESSAGE${NC}"
+            error "Validação falhou"
+        fi
+        
+        BASE_LINK=$(echo "$RESPONSE" | jq -r '.base_link // empty')
+        
+    else
+        # Fallback: usa grep e sed para extrair os valores
+        if echo "$RESPONSE" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
+            STATUS="success"
+            # Extrai o base_link
+            BASE_LINK=$(echo "$RESPONSE" | grep -o '"base_link"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/"base_link"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/')
+            
+            if [ -z "$BASE_LINK" ]; then
+                error "Link base não encontrado na resposta"
+            fi
+        else
+            # Tenta extrair mensagem de erro
+            ERROR_MSG=$(echo "$RESPONSE" | grep -o '"message"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/"message"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/')
+            ERROR_MSG=${ERROR_MSG:-"Chave inválida"}
+            echo -e "${RED}❌ $ERROR_MSG${NC}"
+            error "Validação falhou"
+        fi
     fi
-    
-    # Extrai o link base
-    BASE_LINK=$(echo "$RESPONSE" | jq -r '.base_link // empty')
     
     if [ -z "$BASE_LINK" ]; then
         error "Link base não encontrado na resposta"
@@ -501,6 +543,9 @@ install() {
     clear
     echo -e "${BLUE}🚀 Iniciando instalação do Nexyra Link Monitor${NC}"
     
+    # Primeiro instala as dependências básicas
+    install_basic_deps
+    
     # Valida a chave e obtém o link base
     validate_installation_key
     
@@ -510,11 +555,8 @@ install() {
         error "❌ Execute como root"
     fi
 
-    echo "📦 Atualizando sistema..."
-    apt update -y > /dev/null 2>&1 || true
-    
-    echo "📦 Instalando dependências..."
-    apt install -y curl wget jq sudo > /dev/null 2>&1
+    echo "📦 Instalando dependências adicionais..."
+    apt install -y sudo > /dev/null 2>&1
 
     if ! command -v node >/dev/null 2>&1; then
         echo "📦 Instalando Node.js..."
