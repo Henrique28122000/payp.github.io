@@ -24,7 +24,7 @@ SERVICE_FILE="/etc/systemd/system/${APP_NAME}.service"
 MENU_CMD="/usr/local/bin/nexyra"
 
 # ─────────────────────────────────────────
-# CRIA DIRETÓRIO PRIMEIRO (ANTES DO LOG)
+# CRIA DIRETÓRIO PRIMEIRO
 # ─────────────────────────────────────────
 echo -e "${BLUE}📂 Criando diretório $APP_DIR...${NC}"
 mkdir -p "$APP_DIR"
@@ -51,7 +51,7 @@ warning() {
 # BANNER
 # ─────────────────────────────────────────
 clear
-echo -e "${PURPLE}"
+echo -e "${BLUE}"
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║                                                          ║"
 echo "║   ███╗   ██╗███████╗██╗  ██╗██╗   ██╗██████╗  █████╗   ║"
@@ -62,7 +62,7 @@ echo "║   ██║ ╚████║███████╗██╔╝ █
 echo "║   ╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝  ║"
 echo "║                                                          ║"
 echo "║              🔗 NEXYRA LINK - MONITOR                   ║"
-echo "║         Multi-Empresa | Tempo Real | Notificações       ║"
+echo "║                    Versão Simplificada                  ║"
 echo "║                                                          ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -94,9 +94,8 @@ fi
 # ─────────────────────────────────────────
 # UPDATE SYSTEM
 # ─────────────────────────────────────────
-#log "📦 Atualizando sistema..."
-#apt update -y >> "$LOG_FILE" 2>&1 || warning "⚠️ Falha no apt update, continuando..."
-#apt upgrade -y >> "$LOG_FILE" 2>&1 || warning "⚠️ Falha no apt upgrade, continuando..."
+log "📦 Atualizando sistema..."
+apt update -y >> "$LOG_FILE" 2>&1 || warning "⚠️ Falha no apt update, continuando..."
 
 # ─────────────────────────────────────────
 # INSTALA DEPENDÊNCIAS
@@ -122,80 +121,303 @@ fi
 cd "$APP_DIR"
 
 # ─────────────────────────────────────────
-# BAIXA SCRIPT JS ATUALIZADO
+# BAIXA SCRIPT JS SIMPLIFICADO
 # ─────────────────────────────────────────
-log "⬇️ Baixando monitor multi-empresa..."
+log "⬇️ Baixando monitor simplificado..."
 
-# Tenta baixar o script
-if wget -q -O "$JS_FILE" "$JS_URL"; then
-    log "✅ Script baixado com sucesso"
-else
-    warning "⚠️ Falha no download, criando script básico..."
-    cat > "$JS_FILE" <<'EOF'
-// Script básico de monitoramento
-console.log("🚀 Nexyra Link Monitor iniciado...");
-console.log("📡 Versão: 3.0.0");
-console.log("⏱️  Aguardando configuração...");
+# Criar script monitor.js diretamente com seus links
+cat > "$JS_FILE" <<'EOF'
+const { exec } = require("child_process");
+const net = require("net");
+const dns = require("dns");
+const fs = require("fs");
 
-const https = require('https');
-const { exec } = require('child_process');
+// ============================
+// PROTEÇÃO ANTI-FECHAMENTO
+// ============================
+process.on("uncaughtException", err => {
+  console.error("❌ Erro fatal:", err);
+});
+process.on("unhandledRejection", err => {
+  console.error("❌ Promise rejeitada:", err);
+});
 
-function checkServer(host) {
-    return new Promise((resolve) => {
-        exec(`ping -c 1 -W 2 ${host}`, (err) => {
-            resolve(!err);
-        });
-    });
+// ============================
+// LOAD CONFIG
+// ============================
+const config = JSON.parse(fs.readFileSync("./config.json", "utf8"));
+
+const GET_API = config.apis.get_nodes;
+const UPDATE_API = config.apis.update_node;
+
+const TCP_PORTS = config.tcp_ports;
+const TIMEOUT_PING = config.timeouts.ping;
+const TIMEOUT_TCP = config.timeouts.tcp;
+const RETRIES = config.retries;
+const CHECK_INTERVAL = config.check_interval_ms;
+
+const isWindows = process.platform === "win32";
+
+// ============================
+// UTIL
+// ============================
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const isIP = host => /^(\d{1,3}\.){3}\d{1,3}$/.test(host);
+
+// ============================
+// DNS CHECK
+// ============================
+function checkDNS(host) {
+  return new Promise(resolve => {
+    dns.lookup(host, err => resolve(!err));
+  });
 }
 
-setInterval(async () => {
-    console.log(`🔄 Verificando - ${new Date().toLocaleTimeString()}`);
+// ============================
+// ICMP PING
+// ============================
+function pingICMP(host, timeout = TIMEOUT_PING) {
+  return new Promise(resolve => {
+    const start = Date.now();
+    const cmd = isWindows
+      ? `ping -n 1 -w ${timeout} ${host}`
+      : `ping -c 1 -W ${Math.ceil(timeout/1000)} ${host}`;
+
+    exec(cmd, (err, stdout) => {
+      if (err) return resolve({ online: false });
+
+      const match = stdout.match(/(tempo|time)[=<]\s*(\d+)/i);
+      const ms = match ? parseInt(match[2], 10) : null;
+      const timeSpent = Date.now() - start;
+
+      resolve({ 
+        online: true, 
+        ms: ms || timeSpent 
+      });
+    });
+  });
+}
+
+// ============================
+// TCP CHECK
+// ============================
+function checkTCP(host, ports = TCP_PORTS, timeout = TIMEOUT_TCP) {
+  return new Promise(resolve => {
+    let finished = false;
+    let checked = 0;
+
+    ports.forEach(port => {
+      const socket = new net.Socket();
+      socket.setTimeout(timeout);
+
+      const start = Date.now();
+
+      socket.connect(port, host, () => {
+        if (!finished) {
+          const ms = Date.now() - start;
+          finished = true;
+          socket.destroy();
+          resolve({ online: true, port, ms });
+        }
+      });
+
+      socket.on("error", () => {
+        socket.destroy();
+        checked++;
+        if (!finished && checked === ports.length) {
+          finished = true;
+          resolve({ online: false });
+        }
+      });
+
+      socket.on("timeout", () => {
+        socket.destroy();
+        checked++;
+        if (!finished && checked === ports.length) {
+          finished = true;
+          resolve({ online: false });
+        }
+      });
+    });
+  });
+}
+
+// ============================
+// CHECK COMPLETO
+// ============================
+async function isOnline(host) {
+  if (!isIP(host)) {
+    const dnsOk = await checkDNS(host);
+    if (!dnsOk) return { online: false, reason: "dns_failed" };
+  }
+
+  for (let i = 0; i <= RETRIES; i++) {
+    const ping = await pingICMP(host);
+    if (ping.online) {
+      return { 
+        online: true, 
+        ms: ping.ms, 
+        method: "icmp",
+        attempts: i + 1 
+      };
+    }
+
+    const tcp = await checkTCP(host);
+    if (tcp.online) {
+      return { 
+        online: true, 
+        ms: tcp.ms || null,
+        method: `tcp:${tcp.port}`,
+        attempts: i + 1 
+      };
+    }
+
+    if (i < RETRIES) await sleep(1000);
+  }
+
+  return { 
+    online: false, 
+    reason: "timeout",
+    attempts: RETRIES + 1 
+  };
+}
+
+// ============================
+// VERIFICA TODOS OS NÓS
+// ============================
+async function checkAllNodes() {
+  console.log(`\n🔄 Verificação - ${new Date().toLocaleTimeString()}`);
+
+  let nodes = [];
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    const res = await fetch(GET_API, {
+      signal: controller.signal,
+      headers: { "User-Agent": "NexyraLink/1.0" }
+    });
     
-    // Carrega configuração
-    const config = require('./config.json');
+    clearTimeout(timeoutId);
     
-    // Aqui viria a lógica completa
-    console.log("📊 Aguardando configuração das APIs...");
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
     
-}, 60000);
+    nodes = await res.json();
+    
+    if (!Array.isArray(nodes)) {
+      throw new Error("Resposta não é array");
+    }
+    
+  } catch (err) {
+    console.error("❌ Erro ao buscar nós:", err.message);
+    return;
+  }
+
+  console.log(`📊 Total de nós: ${nodes.length}`);
+
+  let alterados = 0;
+
+  for (const node of nodes) {
+    if (!node?.ip) continue;
+
+    try {
+      console.log(`🔍 Verificando ${node.ip}...`);
+      
+      const result = await isOnline(node.ip);
+      const newStatus = result.online ? "online" : "offline";
+
+      if (newStatus !== node.status) {
+        console.log(`⚡ ${node.ip} mudou: ${node.status} → ${newStatus} ${result.method ? `[${result.method}]` : ''}`);
+        
+        const updateData = {
+          id: node.id,
+          status: newStatus,
+          last_ping: result.ms || null
+        };
+
+        const updateRes = await fetch(UPDATE_API, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updateData)
+        });
+
+        if (updateRes.ok) {
+          alterados++;
+          console.log(`✅ Atualizado: ${node.ip} → ${newStatus}`);
+        } else {
+          console.error(`❌ Falha ao atualizar ${node.ip}: HTTP ${updateRes.status}`);
+        }
+      } else {
+        console.log(`✅ ${node.ip} permanece ${newStatus}`);
+      }
+
+      await sleep(500);
+      
+    } catch (err) {
+      console.error(`⚠️ Erro no IP ${node.ip}:`, err.message);
+    }
+  }
+
+  console.log(`✅ Verificação concluída. ${alterados} alterações.`);
+}
+
+// ============================
+// LOOP PRINCIPAL
+// ============================
+(async () => {
+  console.log("=".repeat(50));
+  console.log("🚀 Nexyra Link Monitor - Iniciado");
+  console.log(`⏱️  Intervalo: ${CHECK_INTERVAL/1000}s`);
+  console.log(`📡 API: ${GET_API}`);
+  console.log("=".repeat(50));
+
+  while (true) {
+    const startTime = Date.now();
+    
+    try {
+      await checkAllNodes();
+    } catch (err) {
+      console.error("❌ Erro no loop principal:", err);
+    }
+
+    const elapsed = Date.now() - startTime;
+    const waitTime = Math.max(1000, CHECK_INTERVAL - elapsed);
+    
+    console.log(`⏳ Aguardando ${Math.round(waitTime/1000)}s...\n`);
+    await sleep(waitTime);
+  }
+})();
 EOF
-    log "✅ Script básico criado"
-fi
+
+log "✅ Script monitor.js criado"
 
 # ─────────────────────────────────────────
-# CRIA CONFIG.JSON ATUALIZADO
+# CRIA CONFIG.JSON COM SEUS LINKS
 # ─────────────────────────────────────────
-log "⚙️ Criando arquivo de configuração..."
-
-# Verifica se jq está instalado
-if ! command -v jq >/dev/null 2>&1; then
-    apt install -y jq >> "$LOG_FILE" 2>&1
-fi
+log "⚙️ Criando arquivo de configuração com seus links..."
 
 cat > "$CONFIG_FILE" <<EOF
 {
   "apis": {
-    "get_users": "https://nexyra.myftp.biz/netpulse/get_users_with_servers.php",
-    "get_nodes": "https://nexyra.myftp.biz/netpulse/get_nodes.php",
-    "update_node": "https://nexyra.myftp.biz/netpulse/update_node.php",
-    "update_server": "https://nexyra.myftp.biz/netpulse/update_server_status.php"
+    "get_nodes": "https://nexyra.myftp.biz/netpulse/get_nodes_1.php",
+    "update_node": "https://nexyra.myftp.biz/netpulse/update_node_1.php"
   },
-  "tcp_ports": [80, 443, 22, 21, 8080, 3306, 5432],
+  "tcp_ports": [80, 443, 22, 21, 8080],
   "timeouts": {
     "ping": 3000,
     "tcp": 2000
   },
   "retries": 2,
-  "check_interval_ms": 60000,
-  "log_level": "info",
-  "max_concurrent": 10
+  "check_interval_ms": 30000
 }
 EOF
 
-log "✅ Configuração criada em $CONFIG_FILE"
+log "✅ Configuração criada com seus links"
 
 # ─────────────────────────────────────────
-# CRIA SCRIPTS AUXILIARES
+# CRIA SCRIPTS AUXILIARES SIMPLES
 # ─────────────────────────────────────────
 log "📝 Criando scripts auxiliares..."
 
@@ -203,7 +425,6 @@ log "📝 Criando scripts auxiliares..."
 cat > start.sh <<'EOF'
 #!/bin/bash
 GREEN='\033[0;32m'
-RED='\033[0;31m'
 NC='\033[0m'
 
 echo -e "${GREEN}▶️ Iniciando Nexyra Link...${NC}"
@@ -257,264 +478,76 @@ echo "────────────────────────"
 systemctl status nexyra-link --no-pager
 echo ""
 echo "📡 Últimas 10 verificações:"
-journalctl -u nexyra-link -n 10 --no-pager | grep "Verificando\|Servidor" || echo "Nenhuma verificação ainda"
-EOF
-
-# Script de edição de config
-cat > edit-config.sh <<'EOF'
-#!/bin/bash
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-CONFIG="/opt/nexyra-link/config.json"
-
-if [ ! -f "$CONFIG" ]; then
-    echo -e "${YELLOW}⚠️ Config não encontrada${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}🔧 Editando configuração${NC}"
-echo "────────────────────────"
-nano "$CONFIG"
-
-echo -e "${GREEN}✅ Configuração salva. Reinicie o monitor:${NC}"
-echo "   nexyra restart"
-EOF
-
-# Script de teste de API
-cat > test-api.sh <<'EOF'
-#!/bin/bash
-CYAN='\033[0;36m'
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-NC='\033[0m'
-
-CONFIG="/opt/nexyra-link/config.json"
-
-if [ ! -f "$CONFIG" ]; then
-    echo -e "${RED}❌ Config não encontrada${NC}"
-    exit 1
-fi
-
-GET_USERS=$(jq -r '.apis.get_users' "$CONFIG")
-GET_NODES=$(jq -r '.apis.get_nodes' "$CONFIG")
-UPDATE_NODE=$(jq -r '.apis.update_node' "$CONFIG")
-UPDATE_SERVER=$(jq -r '.apis.update_server' "$CONFIG")
-
-echo -e "${CYAN}🔍 Testando APIs${NC}"
-echo "────────────────────────"
-
-test_api() {
-    local url=$1
-    local name=$2
-    
-    echo -n "📡 $name... "
-    if curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$url" | grep -q "200\|404"; then
-        echo -e "${GREEN}OK${NC}"
-    else
-        echo -e "${RED}FALHOU${NC}"
-    fi
-}
-
-test_api "$GET_USERS" "Get Users"
-test_api "$GET_NODES?userId=test" "Get Nodes"
-test_api "$UPDATE_NODE" "Update Node"
-test_api "$UPDATE_SERVER" "Update Server"
-
-echo ""
-echo -e "${CYAN}⚙️ Configurações atuais:${NC}"
-jq '.' "$CONFIG"
+journalctl -u nexyra-link -n 10 --no-pager | grep -E "Verificação|✅|❌" || echo "Nenhuma verificação ainda"
 EOF
 
 # Dar permissão de execução
 chmod +x *.sh
-log "✅ Scripts auxiliares criados"
 
 # ─────────────────────────────────────────
-# CRIA MENU INTERATIVO AVANÇADO
+# CRIA MENU SIMPLES E FUNCIONAL
 # ─────────────────────────────────────────
-log "📝 Criando menu interativo..."
+log "📝 Criando menu simples..."
 cat > menu.sh <<'EOF'
 #!/bin/bash
 
-# ─────────────────────────────────────────
-# CORES
-# ─────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
-WHITE='\033[1;37m'
 NC='\033[0m'
 
 APP_DIR="/opt/nexyra-link"
 CONFIG="$APP_DIR/config.json"
 
-# ─────────────────────────────────────────
-# FUNÇÕES
-# ─────────────────────────────────────────
-show_header() {
+show_menu() {
     clear
-    echo -e "${BLUE}"
-    echo "╔══════════════════════════════════════════════════════════╗"
-    echo "║                 NEXYRA LINK - MONITOR                    ║"
-    echo "║                    Multi-Empresa v3.0                    ║"
-    echo "╚══════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+    echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║       NEXYRA LINK - MONITOR            ║${NC}"
+    echo -e "${BLUE}╠════════════════════════════════════════╣${NC}"
+    echo -e "${BLUE}║${NC}  ${GREEN}1)${NC} ▶️  Iniciar monitor              ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${RED}2)${NC} ⏹️  Parar monitor                ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${BLUE}3)${NC} 🔄  Reiniciar monitor            ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${CYAN}4)${NC} 📄  Ver logs                     ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${YELLOW}5)${NC} 📊  Status                      ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${YELLOW}6)${NC} 🔧  Editar intervalo (min)      ${BLUE}║${NC}"
+    echo -e "${BLUE}║${NC}  ${RED}0)${NC} 🚪  Sair                         ${BLUE}║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
     echo ""
-}
-
-edit_apis() {
-    echo -e "${CYAN}🔧 EDITAR APIS${NC}"
-    echo "────────────────────────"
-    
-    current_get=$(jq -r '.apis.get_users' "$CONFIG")
-    current_nodes=$(jq -r '.apis.get_nodes' "$CONFIG")
-    current_update=$(jq -r '.apis.update_node' "$CONFIG")
-    current_server=$(jq -r '.apis.update_server' "$CONFIG")
-    
-    echo -e "Atual GET Users: ${YELLOW}$current_get${NC}"
-    read -p "Nova GET Users (Enter para manter): " new_get
-    [ -n "$new_get" ] && jq ".apis.get_users=\"$new_get\"" "$CONFIG" > tmp && mv tmp "$CONFIG"
-    
-    echo -e "Atual GET Nodes: ${YELLOW}$current_nodes${NC}"
-    read -p "Nova GET Nodes (Enter para manter): " new_nodes
-    [ -n "$new_nodes" ] && jq ".apis.get_nodes=\"$new_nodes\"" "$CONFIG" > tmp && mv tmp "$CONFIG"
-    
-    echo -e "Atual UPDATE Node: ${YELLOW}$current_update${NC}"
-    read -p "Nova UPDATE Node (Enter para manter): " new_upd
-    [ -n "$new_upd" ] && jq ".apis.update_node=\"$new_upd\"" "$CONFIG" > tmp && mv tmp "$CONFIG"
-    
-    echo -e "Atual UPDATE Server: ${YELLOW}$current_server${NC}"
-    read -p "Nova UPDATE Server (Enter para manter): " new_srv
-    [ -n "$new_srv" ] && jq ".apis.update_server=\"$new_srv\"" "$CONFIG" > tmp && mv tmp "$CONFIG"
-    
-    echo -e "${GREEN}✅ APIs atualizadas!${NC}"
-    sleep 2
+    read -p "👉 Escolha: " opt
 }
 
 edit_interval() {
-    echo -e "${CYAN}⏱️ EDITAR INTERVALO${NC}"
-    echo "────────────────────────"
-    
     current_ms=$(jq '.check_interval_ms' "$CONFIG")
     current_min=$((current_ms / 60000))
     
-    echo -e "Atual: ${YELLOW}$current_min minutos${NC}"
+    echo -e "${YELLOW}Intervalo atual: $current_min minutos${NC}"
     read -p "Novo intervalo em minutos: " min
     
     if [[ "$min" =~ ^[0-9]+$ ]] && [ "$min" -gt 0 ]; then
         ms=$((min * 60000))
         jq ".check_interval_ms=$ms" "$CONFIG" > tmp && mv tmp "$CONFIG"
-        echo -e "${GREEN}✅ Intervalo atualizado para $min minutos${NC}"
+        echo -e "${GREEN}✅ Intervalo alterado para $min minutos${NC}"
+        echo -e "${CYAN}Reinicie o monitor para aplicar: opção 3${NC}"
     else
         echo -e "${RED}❌ Valor inválido${NC}"
     fi
-    sleep 2
+    sleep 3
 }
 
-edit_ports() {
-    echo -e "${CYAN}🔌 EDITAR PORTAS TCP${NC}"
-    echo "────────────────────────"
-    
-    current_ports=$(jq '.tcp_ports[]' "$CONFIG" | tr '\n' ' ')
-    echo -e "Portas atuais: ${YELLOW}$current_ports${NC}"
-    read -p "Novas portas (separadas por espaço): " -a ports
-    
-    if [ ${#ports[@]} -gt 0 ]; then
-        ports_json=$(printf '%s\n' "${ports[@]}" | jq -R . | jq -s .)
-        jq ".tcp_ports=$ports_json" "$CONFIG" > tmp && mv tmp "$CONFIG"
-        echo -e "${GREEN}✅ Portas atualizadas!${NC}"
-    fi
-    sleep 2
-}
-
-view_stats() {
-    echo -e "${PURPLE}📊 ESTATÍSTICAS${NC}"
-    echo "────────────────────────"
-    
-    # Status do serviço
-    if systemctl is-active --quiet nexyra-link; then
-        echo -e "Serviço: ${GREEN}ATIVO ✅${NC}"
-    else
-        echo -e "Serviço: ${RED}INATIVO ❌${NC}"
-    fi
-    
-    # Uptime
-    if [ -f "$APP_DIR/uptime.log" ]; then
-        uptime=$(cat "$APP_DIR/uptime.log")
-        echo -e "Iniciado em: ${CYAN}$uptime${NC}"
-    fi
-    
-    # Últimas verificações
-    echo ""
-    echo -e "${YELLOW}Últimas 10 verificações:${NC}"
-    journalctl -u nexyra-link -n 10 --no-pager | grep "Verificando\|Servidor\|✅\|❌" | tail -5 || echo "Nenhuma verificação ainda"
-    
-    # Erros recentes
-    echo ""
-    echo -e "${YELLOW}Erros recentes:${NC}"
-    journalctl -u nexyra-link -n 20 --no-pager | grep "❌\|⚠️" | tail -3 || echo "Nenhum erro encontrado"
-    
-    echo ""
-    read -p "Pressione Enter para continuar..."
-}
-
-# ─────────────────────────────────────────
-# MENU PRINCIPAL
-# ─────────────────────────────────────────
 while true; do
-    show_header
+    show_menu
     
-    echo -e "${WHITE}╔════════════════════════════════════════╗${NC}"
-    echo -e "${WHITE}║           MENU DE CONTROLE            ║${NC}"
-    echo -e "${WHITE}╠════════════════════════════════════════╣${NC}"
-    echo -e "${WHITE}║${NC}  ${GREEN}1)${NC} ▶️  Iniciar monitor               ${WHITE}║${NC}"
-    echo -e "${WHITE}║${NC}  ${RED}2)${NC} ⏹️  Parar monitor                 ${WHITE}║${NC}"
-    echo -e "${WHITE}║${NC}  ${BLUE}3)${NC} 🔄  Reiniciar monitor             ${WHITE}║${NC}"
-    echo -e "${WHITE}║${NC}  ${CYAN}4)${NC} 📄  Ver logs em tempo real        ${WHITE}║${NC}"
-    echo -e "${WHITE}║${NC}  ${PURPLE}5)${NC} 📊  Estatísticas                 ${WHITE}║${NC}"
-    echo -e "${WHITE}╠════════════════════════════════════════╣${NC}"
-    echo -e "${WHITE}║${NC}  ${YELLOW}6)${NC} 🔧  Editar APIs                  ${WHITE}║${NC}"
-    echo -e "${WHITE}║${NC}  ${YELLOW}7)${NC} ⏱️   Editar intervalo            ${WHITE}║${NC}"
-    echo -e "${WHITE}║${NC}  ${YELLOW}8)${NC} 🔌  Editar portas TCP            ${WHITE}║${NC}"
-    echo -e "${WHITE}║${NC}  ${YELLOW}9)${NC} 📝  Editar config manualmente    ${WHITE}║${NC}"
-    echo -e "${WHITE}╠════════════════════════════════════════╣${NC}"
-    echo -e "${WHITE}║${NC}  ${BLUE}10)${NC} 🚀  Ativar auto start (boot)      ${WHITE}║${NC}"
-    echo -e "${WHITE}║${NC}  ${RED}11)${NC} ❌  Desativar auto start          ${WHITE}║${NC}"
-    echo -e "${WHITE}╠════════════════════════════════════════╣${NC}"
-    echo -e "${WHITE}║${NC}  ${CYAN}12)${NC} 🔍  Testar APIs                   ${WHITE}║${NC}"
-    echo -e "${WHITE}║${NC}  ${PURPLE}13)${NC} 📦  Ver versão                   ${WHITE}║${NC}"
-    echo -e "${WHITE}╠════════════════════════════════════════╣${NC}"
-    echo -e "${WHITE}║${NC}  ${RED}0)${NC} 🔚  Sair                          ${WHITE}║${NC}"
-    echo -e "${WHITE}╚════════════════════════════════════════╝${NC}"
-    echo ""
-    read -p "👉 Escolha uma opção: " opt
-
     case "$opt" in
         1) ./start.sh ;;
         2) ./stop.sh ;;
         3) ./restart.sh ;;
         4) ./logs.sh ;;
-        5) view_stats ;;
-        6) edit_apis ;;
-        7) edit_interval ;;
-        8) edit_ports ;;
-        9) ./edit-config.sh ;;
-        10) systemctl enable nexyra-link && echo -e "${GREEN}✅ Auto start ativado${NC}" && sleep 2 ;;
-        11) systemctl disable nexyra-link && echo -e "${RED}❌ Auto start desativado${NC}" && sleep 2 ;;
-        12) ./test-api.sh && read -p "Pressione Enter..." ;;
-        13) 
-            echo -e "${CYAN}Versão: 3.0.0${NC}"
-            echo -e "Node: $(node -v)"
-            echo -e "Data: $(date)"
-            read -p "Pressione Enter..."
-            ;;
+        5) ./status.sh && read -p "Pressione Enter..." ;;
+        6) edit_interval ;;
         0) 
-            echo -e "${GREEN}Até logo! 👋${NC}"
+            echo -e "${GREEN}Até logo!${NC}"
             exit 0
             ;;
         *) 
@@ -526,7 +559,7 @@ done
 EOF
 
 chmod +x menu.sh
-log "✅ Menu interativo criado"
+log "✅ Menu simples criado"
 
 # ─────────────────────────────────────────
 # CRIA COMANDO GLOBAL
@@ -534,43 +567,28 @@ log "✅ Menu interativo criado"
 log "🔗 Criando comando global 'nexyra'..."
 ln -sf "$APP_DIR/menu.sh" "$MENU_CMD"
 chmod +x "$MENU_CMD"
-log "✅ Comando 'nexyra' criado"
 
 # ─────────────────────────────────────────
-# CRIA ARQUIVO DE UPTIME
-# ─────────────────────────────────────────
-date > "$APP_DIR/uptime.log"
-
-# ─────────────────────────────────────────
-# CRIA SERVICE SYSTEMD ATUALIZADO
+# CRIA SERVICE SYSTEMD
 # ─────────────────────────────────────────
 log "⚙️ Criando serviço systemd..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Nexyra Link Monitor - Multi-Empresa
-After=network.target network-online.target
-Wants=network-online.target
+Description=Nexyra Link Monitor
+After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=$APP_DIR
 ExecStart=/usr/bin/node $APP_DIR/$JS_FILE
-ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
 RestartSec=5
 User=root
-Group=root
 Environment=NODE_ENV=production
-Environment=PATH=/usr/bin:/usr/local/bin
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=nexyra-link
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-log "✅ Serviço systemd criado"
 
 # ─────────────────────────────────────────
 # ATIVA E INICIA SERVIÇO
@@ -579,85 +597,61 @@ log "🚀 Ativando e iniciando serviço..."
 systemctl daemon-reload
 systemctl enable nexyra-link >> "$LOG_FILE" 2>&1
 systemctl restart nexyra-link >> "$LOG_FILE" 2>&1
-log "✅ Serviço iniciado"
 
 # ─────────────────────────────────────────
-# CONFIGURA PARA ABRIR MENU NO SSH
+# CONFIGURA MENU NO SSH (OPCIONAL)
 # ─────────────────────────────────────────
-log "🔧 Configurando menu automático no SSH..."
-if ! grep -q "$APP_DIR/menu.sh" /root/.bashrc; then
+if ! grep -q "nexyra" /root/.bashrc; then
     echo "" >> /root/.bashrc
-    echo "# Abrir menu do Nexyra Link automaticamente" >> /root/.bashrc
-    echo "if [ -f $APP_DIR/menu.sh ]; then" >> /root/.bashrc
-    echo "    clear" >> /root/.bashrc
-    echo "    $APP_DIR/menu.sh" >> /root/.bashrc
-    echo "fi" >> /root/.bashrc
-    log "✅ Configurado para abrir menu no SSH"
+    echo "# Comando nexyra disponível" >> /root/.bashrc
+    echo "echo '💡 Digite ${GREEN}nexyra${NC} para abrir o menu'" >> /root/.bashrc
 fi
 
 # ─────────────────────────────────────────
 # VERIFICA INSTALAÇÃO
 # ─────────────────────────────────────────
-log "🔍 Verificando instalação..."
 sleep 3
-
 if systemctl is-active --quiet nexyra-link; then
     echo -e "${GREEN}✅ Serviço está rodando!${NC}"
 else
     warning "⚠️ Serviço não está rodando, verificando logs..."
-    journalctl -u nexyra-link -n 10 --no-pager
+    journalctl -u nexyra-link -n 5 --no-pager
 fi
 
 # ─────────────────────────────────────────
-# LIMPA O TERMINAL E MOSTRA RESUMO
+# RESUMO FINAL
 # ─────────────────────────────────────────
 clear
 echo -e "${GREEN}"
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║                                                          ║"
-echo "║       ✅ INSTALAÇÃO 100% CONCLUÍDA COM SUCESSO          ║"
-echo "║                                                          ║"
-echo "╚══════════════════════════════════════════════════════════╝"
+echo "╔════════════════════════════════════════╗"
+echo "║    INSTALAÇÃO CONCLUÍDA COM SUCESSO   ║"
+echo "╚════════════════════════════════════════╝"
 echo -e "${NC}"
 echo ""
 echo -e "${CYAN}📋 INFORMAÇÕES:${NC}"
-echo "──────────────────────────────"
+echo "────────────────────────"
 echo -e "📂 Diretório: ${YELLOW}$APP_DIR${NC}"
-echo -e "⚙️  Config: ${YELLOW}$CONFIG_FILE${NC}"
-echo -e "📦 Versão: ${YELLOW}3.0.0${NC}"
-echo -e "🖥️  Node: ${YELLOW}$(node -v)${NC}"
-echo -e "📝 Log: ${YELLOW}$LOG_FILE${NC}"
+echo -e "🔗 GET API: ${YELLOW}https://nexyra.myftp.biz/netpulse/get_nodes_1.php${NC}"
+echo -e "🔗 UPDATE API: ${YELLOW}https://nexyra.myftp.biz/netpulse/update_node_1.php${NC}"
+echo -e "⏱️  Intervalo: ${YELLOW}30 segundos${NC}"
 echo ""
-echo -e "${GREEN}🚀 COMANDOS DISPONÍVEIS:${NC}"
-echo "──────────────────────────────"
-echo -e "   ${WHITE}nexyra${NC}        → Abrir menu interativo"
-echo -e "   ${WHITE}systemctl status nexyra-link${NC} → Ver status"
-echo -e "   ${WHITE}journalctl -u nexyra-link -f${NC} → Ver logs"
+echo -e "${GREEN}🚀 COMANDOS:${NC}"
+echo "────────────────────────"
+echo -e "   ${WHITE}nexyra${NC}        → Menu interativo"
+echo -e "   ${WHITE}systemctl status nexyra-link${NC} → Status do serviço"
+echo -e "   ${WHITE}journalctl -u nexyra-link -f${NC} → Logs em tempo real"
 echo ""
-echo -e "${YELLOW}📝 PRÓXIMOS PASSOS:${NC}"
-echo "──────────────────────────────"
-echo -e "1️⃣  Execute ${WHITE}nexyra${NC} para abrir o menu"
-echo -e "2️⃣  Configure as APIs no menu (opção 6)"
-echo -e "3️⃣  Coloque suas URLs:"
-echo -e "    ${CYAN}https://SEU-DOMINIO.com/api/get_users_with_servers.php${NC}"
-echo -e "    ${CYAN}https://SEU-DOMINIO.com/api/get_nodes.php${NC}"
-echo -e "    ${CYAN}https://SEU-DOMINIO.com/api/update_node.php${NC}"
-echo -e "    ${CYAN}https://SEU-DOMINIO.com/api/update_server_status.php${NC}"
-echo -e "4️⃣  Teste as conexões (opção 12)"
-echo -e "5️⃣  Ajuste o intervalo de verificação (opção 7)"
+echo -e "${YELLOW}📝 Para alterar o intervalo:${NC}"
+echo "   1. Execute: nexyra"
+echo "   2. Escolha opção 6"
+echo "   3. Digite os minutos"
+echo "   4. Reinicie com opção 3"
 echo ""
-echo -e "${BLUE}🔗 ACESSO RÁPIDO:${NC}"
-echo "──────────────────────────────"
-echo -e "   ${WHITE}cd $APP_DIR && ./menu.sh${NC}"
-echo ""
-echo -e "${PURPLE}✨ O menu abrirá automaticamente na próxima vez que conectar via SSH!${NC}"
-echo -e "${GREEN}👉 Digite 'nexyra' para abrir agora!${NC}"
+echo -e "${GREEN}👉 Digite 'nexyra' para começar!${NC}"
 echo ""
 
-# ─────────────────────────────────────────
-# PERGUNTA SE QUER ABRIR MENU AGORA
-# ─────────────────────────────────────────
-read -p "❓ Deseja abrir o menu agora? (s/N): " -n 1 -r
+# Pergunta se quer abrir o menu
+read -p "❓ Abrir menu agora? (s/N): " -n 1 -r
 echo ""
 if [[ $REPLY =~ ^[Ss]$ ]]; then
     cd "$APP_DIR"
