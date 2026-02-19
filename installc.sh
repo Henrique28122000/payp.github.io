@@ -259,6 +259,8 @@ const { exec } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
+const net = require("net");
+const dns = require("dns");
 const os = require("os");
 
 const config = JSON.parse(fs.readFileSync("./config.json", "utf8"));
@@ -269,205 +271,268 @@ const GET_USERS_API = config.apis.get_users;
 const UPDATE_SERVER_API = config.apis.update_server;
 const CHECK_INTERVAL = config.check_interval_ms || 30000;
 
-// Função para obter o IP do servidor atual
+const TIMEOUT = 5000;
+const RETRIES = 2;
+
+/* ============================= */
+/* PEGAR IP DO SERVIDOR */
+/* ============================= */
+
 function getCurrentServerIP() {
     const interfaces = os.networkInterfaces();
     for (const name of Object.keys(interfaces)) {
         for (const iface of interfaces[name]) {
-            // Pula interfaces internas e IPv6
-            if (iface.internal) continue;
-            if (iface.family !== 'IPv4') continue;
-            return iface.address;
+            if (!iface.internal && iface.family === "IPv4") {
+                return iface.address;
+            }
         }
     }
     return null;
 }
 
 const SERVER_IP = getCurrentServerIP();
-console.log("=".repeat(50));
-console.log("🚀 Nexyra Link Monitor iniciado");
-console.log(`🌐 IP do Servidor: ${SERVER_IP}`);
-console.log(`⏱️  Intervalo: ${CHECK_INTERVAL/1000}s`);
-console.log("=".repeat(50));
+
+console.log("==================================================");
+console.log("🚀 NEXYRA LINK MONITOR COMPLETO");
+console.log("🌐 IP do Servidor:", SERVER_IP);
+console.log("⏱ Intervalo:", CHECK_INTERVAL / 1000, "segundos");
+console.log("==================================================");
+
+/* ============================= */
+/* REQUISIÇÃO API */
+/* ============================= */
 
 function request(url, postData = null) {
     return new Promise((resolve, reject) => {
-        const parsedUrl = new URL(url);
-        const client = parsedUrl.protocol === 'https:' ? https : http;
-        
+        const parsed = new URL(url);
+        const client = parsed.protocol === "https:" ? https : http;
+
         const options = {
-            hostname: parsedUrl.hostname,
-            port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-            path: parsedUrl.pathname + parsedUrl.search,
-            method: postData ? 'POST' : 'GET',
-            headers: { 'Content-Type': 'application/json' },
+            hostname: parsed.hostname,
+            port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+            path: parsed.pathname + parsed.search,
+            method: postData ? "POST" : "GET",
+            headers: { "Content-Type": "application/json" },
             timeout: 10000
         };
 
-        const req = client.request(options, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-                if (res.statusCode >= 200 && res.statusCode < 300) {
-                    try { resolve(JSON.parse(data)); } 
-                    catch { resolve(data); }
-                } else {
-                    reject(new Error(`HTTP ${res.statusCode}`));
+        const req = client.request(options, res => {
+            let data = "";
+            res.on("data", chunk => data += chunk);
+            res.on("end", () => {
+                try {
+                    resolve(JSON.parse(data));
+                } catch {
+                    resolve(data);
                 }
             });
         });
 
-        req.on('error', reject);
-        req.on('timeout', () => req.destroy());
-        
+        req.on("error", reject);
+        req.on("timeout", () => {
+            req.destroy();
+            reject(new Error("Timeout API"));
+        });
+
         if (postData) req.write(JSON.stringify(postData));
         req.end();
     });
 }
 
+/* ============================= */
+/* TESTES */
+/* ============================= */
+
 function ping(host) {
     return new Promise(resolve => {
         if (!host) return resolve(false);
-        exec(`ping -c 1 -W 2 ${host} 2>/dev/null`, (error) => {
-            resolve(!error);
+
+        const isWin = process.platform === "win32";
+        const cmd = isWin
+            ? `ping -n 1 -w 2000 ${host}`
+            : `ping -c 1 -W 2 ${host}`;
+
+        exec(cmd, error => resolve(!error));
+    });
+}
+
+function tcpCheck(host, port = 80) {
+    return new Promise(resolve => {
+        const socket = new net.Socket();
+        socket.setTimeout(TIMEOUT);
+
+        socket.on("connect", () => {
+            socket.destroy();
+            resolve(true);
+        });
+
+        socket.on("timeout", () => {
+            socket.destroy();
+            resolve(false);
+        });
+
+        socket.on("error", () => resolve(false));
+
+        socket.connect(port, host);
+    });
+}
+
+function httpCheck(url) {
+    return new Promise(resolve => {
+        const client = url.startsWith("https") ? https : http;
+
+        const req = client.get(url, { timeout: TIMEOUT }, res => {
+            resolve(res.statusCode >= 200 && res.statusCode < 400);
+        });
+
+        req.on("error", () => resolve(false));
+        req.on("timeout", () => {
+            req.destroy();
+            resolve(false);
         });
     });
 }
 
-async function checkServers() {
-    try {
-        const users = await request(GET_USERS_API);
-        if (!Array.isArray(users)) return;
-        
-        for (const user of users) {
-            // Só processa usuários cujo monitoring_ip é igual ao IP deste servidor
-            if (!user.monitoring_ip || user.monitoring_ip !== SERVER_IP) {
-                if (user.monitoring_ip) {
-                    console.log(`⏭️  Ignorando usuário ${user.email || user.uid} - IP diferente (${user.monitoring_ip} != ${SERVER_IP})`);
-                }
-                continue;
-            }
-            
-            // Se o IP do servidor de monitoramento for igual ao IP atual
-            // Isso significa que este servidor é responsável por monitorar este usuário
-            console.log(`📡 Monitorando servidor: ${user.email || user.uid} - IP: ${user.monitoring_ip}`);
-            
-            const online = await ping(user.monitoring_ip);
-            const now = new Date();
-            
-            // Horário de Brasília (GMT-3)
-            const brasiliaTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
-            const lastUpdate = brasiliaTime.toISOString().slice(0,19).replace('T',' ');
+function dnsCheck(host) {
+    return new Promise(resolve => {
+        dns.lookup(host, err => resolve(!err));
+    });
+}
 
-            await request(UPDATE_SERVER_API, {
-                uid: user.uid,
-                is_online: online ? 1 : 0,
-                last_update: lastUpdate
-            }).catch(() => {});
-            
-            console.log(`${online ? '✅' : '❌'} Servidor ${user.email || user.uid} - ${user.monitoring_ip}`);
-        }
-    } catch (err) {
-        console.log("❌ Erro em servidores:", err.message);
+/* ============================= */
+/* MULTI TESTE (ANTI FALSO OFFLINE) */
+/* ============================= */
+
+async function multiCheck(node) {
+    for (let i = 0; i <= RETRIES; i++) {
+
+        let ok = false;
+
+        // ICMP
+        ok = await ping(node.ip);
+        if (ok) return true;
+
+        // TCP
+        ok = await tcpCheck(node.ip, node.port || 80);
+        if (ok) return true;
+
+        // HTTP
+        ok = await httpCheck(`http://${node.ip}`);
+        if (ok) return true;
+
+        // HTTPS
+        ok = await httpCheck(`https://${node.ip}`);
+        if (ok) return true;
+
+        // DNS
+        ok = await dnsCheck(node.ip);
+        if (ok) return true;
+    }
+
+    return false;
+}
+
+/* ============================= */
+/* ATUALIZA STATUS SERVIDOR */
+/* ============================= */
+
+async function updateServerStatus(uid, online) {
+    const now = new Date();
+    const brasiliaTime = new Date(
+        now.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" })
+    );
+    const lastUpdate = brasiliaTime
+        .toISOString()
+        .slice(0, 19)
+        .replace("T", " ");
+
+    await request(UPDATE_SERVER_API, {
+        uid: uid,
+        is_online: online ? 1 : 0,
+        last_update: lastUpdate
+    });
+}
+
+/* ============================= */
+/* VERIFICA SERVIDORES */
+/* ============================= */
+
+async function checkServers() {
+    const users = await request(GET_USERS_API);
+    if (!Array.isArray(users)) return;
+
+    for (const user of users) {
+        if (user.monitoring_ip !== SERVER_IP) continue;
+
+        console.log(`📡 Monitorando servidor do usuário ${user.uid}`);
+
+        const online = await ping(user.monitoring_ip);
+
+        await updateServerStatus(user.uid, online);
+
+        console.log(
+            online
+                ? `✅ Servidor ${user.uid} ONLINE`
+                : `❌ Servidor ${user.uid} OFFLINE`
+        );
     }
 }
+
+/* ============================= */
+/* VERIFICA NODES */
+/* ============================= */
 
 async function checkNodes() {
-    try {
-        const users = await request(GET_USERS_API);
-        if (!Array.isArray(users)) return;
-        
-        for (const user of users) {
-            // Só processa usuários cujo monitoring_ip é igual ao IP deste servidor
-            if (!user.monitoring_ip || user.monitoring_ip !== SERVER_IP) {
-                continue;
-            }
-            
-            console.log(`📡 Buscando nodes do usuário: ${user.email || user.uid}`);
-            
-            const nodes = await request(`${GET_NODES_API}?userId=${user.uid}`).catch(() => []);
-            if (!Array.isArray(nodes)) continue;
-            
-            for (const node of nodes) {
-                if (!node?.ip) continue;
-                
-                const online = await ping(node.ip);
-                const newStatus = online ? "online" : "offline";
-                
-                if (newStatus !== node.status) {
-                    await request(UPDATE_NODE_API, { 
-                        id: node.id, 
-                        status: newStatus 
-                    }).catch(() => {});
-                    console.log(`⚡ Node ${node.ip}: ${node.status || 'unknown'} → ${newStatus}`);
-                } else {
-                    console.log(`📊 Node ${node.ip}: permanece ${newStatus}`);
-                }
+    const users = await request(GET_USERS_API);
+    if (!Array.isArray(users)) return;
+
+    for (const user of users) {
+        if (user.monitoring_ip !== SERVER_IP) continue;
+
+        const nodes = await request(`${GET_NODES_API}?userId=${user.uid}`);
+        if (!Array.isArray(nodes)) continue;
+
+        for (const node of nodes) {
+            if (!node.ip) continue;
+
+            console.log(`🔍 Testando node ${node.ip}`);
+
+            const online = await multiCheck(node);
+            const newStatus = online ? "online" : "offline";
+
+            if (newStatus !== node.status) {
+                await request(UPDATE_NODE_API, {
+                    id: node.id,
+                    status: newStatus
+                });
+
+                console.log(`⚡ ALTERADO ${node.ip} → ${newStatus}`);
+            } else {
+                console.log(`📊 ${node.ip} permanece ${newStatus}`);
             }
         }
-    } catch (err) {
-        console.log("❌ Erro em nodes:", err.message);
     }
 }
 
-async function checkServerStatus() {
-    try {
-        // Verifica se este servidor está registrado como monitoring_ip para algum usuário
-        const users = await request(GET_USERS_API);
-        if (!Array.isArray(users)) return;
-        
-        const myUsers = users.filter(u => u.monitoring_ip === SERVER_IP);
-        
-        if (myUsers.length === 0) {
-            console.log(`⚠️  Nenhum usuário configurado com IP ${SERVER_IP}`);
-            console.log(`📝 Usuários encontrados com outros IPs:`);
-            users.filter(u => u.monitoring_ip).forEach(u => {
-                console.log(`   • ${u.email || u.uid}: ${u.monitoring_ip}`);
-            });
-        } else {
-            console.log(`✅ Monitorando ${myUsers.length} usuário(s) com IP ${SERVER_IP}`);
-        }
-    } catch (err) {
-        console.log("❌ Erro ao verificar status:", err.message);
-    }
-}
+/* ============================= */
+/* LOOP PRINCIPAL */
+/* ============================= */
 
 async function run() {
-    console.log(`\n🔄 Verificação - ${new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`);
-    console.log(`🌐 IP do servidor: ${SERVER_IP}`);
-    
-    // Primeiro verifica o status do servidor
-    await checkServerStatus();
-    
-    // Depois monitora os servidores
-    await checkServers();
-    
-    // E por fim os nodes
-    await checkNodes();
+    console.log("\n🔄 Nova verificação:", new Date().toLocaleString("pt-BR"));
+    console.log("🌐 IP do servidor:", SERVER_IP);
+
+    try {
+        await checkServers();
+        await checkNodes();
+    } catch (err) {
+        console.log("❌ ERRO GERAL:", err.message);
+    }
 }
 
-// Executa uma verificação inicial
-checkServerStatus().then(() => {
-    run();
-    setInterval(run, CHECK_INTERVAL);
-});
-EOF
-}
+run();
+setInterval(run, CHECK_INTERVAL);
 
-# ─────────────────────────────────────────────────────────────
-# CRIAR CONFIG.JSON
-# ─────────────────────────────────────────────────────────────
-create_config_file() {
-    cat > "$CONFIG_FILE" <<EOF
-{
-  "apis": {
-    "get_users": "$GET_USERS_API",
-    "get_nodes": "$GET_NODES_API",
-    "update_node": "$UPDATE_NODE_API",
-    "update_server": "$UPDATE_SERVER_API"
-  },
-  "check_interval_ms": 30000
-}
 EOF
 }
 
