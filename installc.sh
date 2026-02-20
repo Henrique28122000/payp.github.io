@@ -257,8 +257,7 @@ create_js_file() {
     cat > "$APP_DIR/$JS_FILE" <<'EOF'
            
             
-            
-            const { exec } = require("child_process");
+const { exec } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
@@ -836,8 +835,6 @@ process.on('SIGINT', () => {
     process.exit();
 });
             
-            
-
     
     
 EOF
