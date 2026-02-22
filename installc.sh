@@ -256,586 +256,304 @@ uninstall() {
 create_js_file() {
     cat > "$APP_DIR/$JS_FILE" <<'EOF'
            
-            
 const { exec } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const https = require("https");
 const net = require("net");
-const dns = require("dns");
 const os = require("os");
 const { promisify } = require("util");
 
 const execAsync = promisify(exec);
-const dnsLookup = promisify(dns.lookup);
-
 const config = JSON.parse(fs.readFileSync("./config.json", "utf8"));
+
+/* ================= CONFIG ================= */
 
 const GET_NODES_API = config.apis.get_nodes;
 const UPDATE_NODE_API = config.apis.update_node;
 const GET_USERS_API = config.apis.get_users;
 const UPDATE_SERVER_API = config.apis.update_server;
+
 const CHECK_INTERVAL = config.check_interval_ms || 30000;
+const TIMEOUT = 1500;
+const MAX_CONCURRENT = 10;
+const OFFLINE_THRESHOLD = 60000;
 
-const TIMEOUT = 5000;
-const RETRIES = 2;
-const BATCH_SIZE = 1;
+/* ================= ESTADO ================= */
 
-/* ============================= */
-/* ESTADO EM MEMÓRIA */
-/* ============================= */
-const nodeState = {
-    all: new Map(),
-    online: new Set(),
-    offline: new Set(),
-    unknown: new Set(),
-    lastCheck: new Map(),
-    failCount: new Map(),
-    processing: new Set()
+const state = {
+  nodes: new Map(),
+  servers: new Map()
 };
 
-const serverState = {
-    all: new Map(),
-    online: new Set(),
-    offline: new Set(),
-    processing: new Set()
-};
+/* ================= IP LOCAL ================= */
 
-/* ============================= */
-/* PEGAR IP DO SERVIDOR */
-/* ============================= */
-function getCurrentServerIP() {
-    const interfaces = os.networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-        for (const iface of interfaces[name]) {
-            if (!iface.internal && iface.family === "IPv4") {
-                return iface.address;
-            }
-        }
+function getLocalIP() {
+  const nets = os.networkInterfaces();
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (!net.internal && net.family === "IPv4") {
+        return net.address;
+      }
     }
-    return null;
+  }
+  return null;
 }
 
-const SERVER_IP = getCurrentServerIP();
+const SERVER_IP = getLocalIP();
 
-console.log("==================================================");
-console.log("🚀 NEXYRA LINK MONITOR - COM ATUALIZAÇÃO DE IP");
-console.log("🌐 IP do Servidor:", SERVER_IP);
-console.log("⏱ Intervalo completo:", CHECK_INTERVAL / 1000, "segundos");
-console.log("🔄 Atualiza lista de nodes a cada ciclo");
-console.log("==================================================");
+console.log("🚀 MONITOR INICIADO");
+console.log("🌐 IP:", SERVER_IP);
 
-/* ============================= */
-/* REQUISIÇÃO API */
-/* ============================= */
+/* ================= REQUEST ================= */
+
 async function request(url, postData = null) {
-    return new Promise((resolve, reject) => {
-        const parsed = new URL(url);
-        const client = parsed.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === "https:" ? https : http;
 
-        const options = {
-            hostname: parsed.hostname,
-            port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
-            path: parsed.pathname + parsed.search,
-            method: postData ? "POST" : "GET",
-            headers: { "Content-Type": "application/json" },
-            timeout: 10000
-        };
-
-        const req = client.request(options, res => {
-            let data = "";
-            res.on("data", chunk => data += chunk);
-            res.on("end", () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch {
-                    resolve(data);
-                }
-            });
-        });
-
-        req.on("error", reject);
-        req.on("timeout", () => {
-            req.destroy();
-            reject(new Error("Timeout API"));
-        });
-
-        if (postData) req.write(JSON.stringify(postData));
-        req.end();
+    const req = client.request({
+      hostname: parsed.hostname,
+      port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: postData ? "POST" : "GET",
+      headers: { "Content-Type": "application/json" },
+      timeout: 5000
+    }, res => {
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); }
+        catch { resolve(data); }
+      });
     });
+
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Timeout"));
+    });
+
+    if (postData) req.write(JSON.stringify(postData));
+    req.end();
+  });
 }
 
-/* ============================= */
-/* TESTES DE CONECTIVIDADE */
-/* ============================= */
+/* ================= TESTES ================= */
 
-// Ping
 async function pingTest(host) {
-    if (!host) return false;
-    try {
-        const isWin = process.platform === "win32";
-        const cmd = isWin
-            ? `ping -n 1 -w 2000 ${host}`
-            : `ping -c 1 -W 2 ${host}`;
-        await execAsync(cmd, { timeout: 2000 });
-        return true;
-    } catch {
-        return false;
-    }
-}
+  try {
+    const cmd = process.platform === "win32"
+      ? `ping -n 1 -w 1000 ${host}`
+      : `ping -c 1 -W 1 ${host}`;
 
-// TCP Connect
-async function tcpTest(host, port = 80) {
-    return new Promise(resolve => {
-        const socket = new net.Socket();
-        socket.setTimeout(2000);
-
-        socket.on("connect", () => {
-            socket.destroy();
-            resolve(true);
-        });
-
-        socket.on("timeout", () => {
-            socket.destroy();
-            resolve(false);
-        });
-
-        socket.on("error", () => resolve(false));
-
-        socket.connect(port, host);
-    });
-}
-
-// HTTP
-async function httpTest(url) {
-    return new Promise(resolve => {
-        const client = url.startsWith("https") ? https : http;
-        
-        const req = client.get(url, { 
-            timeout: 2000,
-            rejectUnauthorized: false
-        }, res => {
-            resolve(res.statusCode >= 200 && res.statusCode < 500);
-            req.destroy();
-        });
-
-        req.on("error", () => resolve(false));
-        req.on("timeout", () => {
-            req.destroy();
-            resolve(false);
-        });
-    });
-}
-
-/* ============================= */
-/* TESTE COMPLETO - 4 TESTES */
-/* ============================= */
-async function preciseCheck(node) {
-    console.log(`   🔍 Testando node ${node.ip}:${node.port || 80}...`);
-    
-    const host = node.ip;
-    const port = node.port || 80;
-    const startTime = Date.now();
-    
-    // TESTES EM SEQUÊNCIA
-    console.log(`      ├─ Teste 1/4: Ping...`);
-    if (await pingTest(host)) {
-        console.log(`      ✅ ONLINE via Ping (${Date.now() - startTime}ms)`);
-        return true;
-    }
-    
-    console.log(`      ├─ Teste 2/4: TCP...`);
-    if (await tcpTest(host, port)) {
-        console.log(`      ✅ ONLINE via TCP (${Date.now() - startTime}ms)`);
-        return true;
-    }
-    
-    console.log(`      ├─ Teste 3/4: HTTP...`);
-    if (await httpTest(`http://${host}:${port}`)) {
-        console.log(`      ✅ ONLINE via HTTP (${Date.now() - startTime}ms)`);
-        return true;
-    }
-    
-    console.log(`      ├─ Teste 4/4: HTTPS...`);
-    if (await httpTest(`https://${host}:${port}`)) {
-        console.log(`      ✅ ONLINE via HTTPS (${Date.now() - startTime}ms)`);
-        return true;
-    }
-    
-    console.log(`      ❌ OFFLINE - Todos os testes falharam (${Date.now() - startTime}ms)`);
+    await execAsync(cmd, { timeout: TIMEOUT });
+    return true;
+  } catch {
     return false;
+  }
 }
 
-/* ============================= */
-/* TESTE RÁPIDO */
-/* ============================= */
-async function quickCheck(node) {
-    const host = node.ip;
-    const port = node.port || 80;
-    
-    const [pingResult, tcpResult] = await Promise.all([
-        pingTest(host),
-        tcpTest(host, port)
-    ]);
-    
-    return pingResult || tcpResult;
+async function tcpTest(host, port = 80) {
+  return new Promise(resolve => {
+    const socket = new net.Socket();
+    socket.setTimeout(TIMEOUT);
+
+    socket.on("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+
+    socket.on("error", () => resolve(false));
+    socket.on("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+
+    socket.connect(port, host);
+  });
 }
 
-/* ============================= */
-/* ATUALIZA STATUS SERVIDOR */
-/* ============================= */
-async function updateServerStatus(uid, online) {
-    if (serverState.processing.has(uid)) return;
-    serverState.processing.add(uid);
-    
-    try {
-        const now = new Date();
-        const brasiliaTime = new Date(
-            now.toLocaleString("en-US", { timeZone: "America/Sao_Paulo" })
-        );
-        const lastUpdate = brasiliaTime
-            .toISOString()
-            .slice(0, 19)
-            .replace("T", " ");
-
-        const server = serverState.all.get(uid);
-        if (server) {
-            const oldStatus = server.online;
-            server.online = online;
-            server.lastUpdate = lastUpdate;
-            
-            if (online) {
-                serverState.online.add(uid);
-                serverState.offline.delete(uid);
-            } else {
-                serverState.offline.add(uid);
-                serverState.online.delete(uid);
-            }
-            
-            if (oldStatus !== online) {
-                console.log(`\n${online ? '🟢' : '🔴'} SERVIDOR ${uid} ${online ? 'ONLINE' : 'OFFLINE'}`);
-            }
-        }
-
-        await request(UPDATE_SERVER_API, {
-            uid: uid,
-            is_online: online ? 1 : 0,
-            last_update: lastUpdate
-        });
-    } finally {
-        serverState.processing.delete(uid);
-    }
+async function testHost(ip, port = 80) {
+  if (await pingTest(ip)) return true;
+  if (await tcpTest(ip, port)) return true;
+  return false;
 }
 
-/* ============================= */
-/* ATUALIZA STATUS NODE */
-/* ============================= */
-async function updateNodeStatus(node, online, isQuickCheck = false) {
-    if (nodeState.processing.has(node.id)) return;
-    nodeState.processing.add(node.id);
-    
-    try {
-        const newStatus = online ? "online" : "offline";
-        const oldStatus = node.status;
-        
-        node.status = newStatus;
-        node.lastCheck = new Date().toISOString();
-        if (online) node.lastOnline = node.lastCheck;
-        
-        nodeState.lastCheck.set(node.id, Date.now());
-        
-        if (online) {
-            nodeState.online.add(node.id);
-            nodeState.offline.delete(node.id);
-            nodeState.unknown.delete(node.id);
-            nodeState.failCount.set(node.id, 0);
-        } else {
-            nodeState.offline.add(node.id);
-            nodeState.online.delete(node.id);
-            nodeState.unknown.delete(node.id);
-            const failCount = (nodeState.failCount.get(node.id) || 0) + 1;
-            nodeState.failCount.set(node.id, failCount);
-        }
-        
-        if (newStatus !== oldStatus) {
-            await request(UPDATE_NODE_API, {
-                id: node.id,
-                status: newStatus,
-                last_check: node.lastCheck,
-                last_online: node.lastOnline,
-                fail_count: nodeState.failCount.get(node.id) || 0
-            });
-            
-            if (!isQuickCheck) {
-                console.log(`\n⚡ ${online ? '🟢' : '🔴'} NODE ${node.ip} → ${newStatus}`);
-                if (!online && oldStatus === 'online') {
-                    console.log(`   ⚠️ Caiu às ${new Date().toLocaleTimeString()}`);
-                } else if (online && oldStatus === 'offline') {
-                    const offlineTime = Math.round((Date.now() - (nodeState.lastCheck.get(node.id) || Date.now())) / 1000);
-                    console.log(`   ✅ Voltou após ${offlineTime}s`);
-                }
-            }
-        }
-    } finally {
-        nodeState.processing.delete(node.id);
+/* ================= NODE ================= */
+
+async function updateNode(node, isOnline) {
+
+  const now = Date.now();
+
+  if (!node.memory) {
+    node.memory = {
+      firstFail: null
+    };
+  }
+
+  if (isOnline) {
+
+    node.memory.firstFail = null;
+
+    if (node.status !== "online") {
+      node.status = "online";
+      console.log(`🟢 NODE ${node.ip} ONLINE`);
+
+      await request(UPDATE_NODE_API, {
+        id: node.id,
+        status: "online",
+        last_online: new Date().toISOString()
+      });
     }
+
+    return;
+  }
+
+  if (!node.memory.firstFail) {
+    node.memory.firstFail = now;
+    console.log(`⚠ SUSPEITO ${node.ip}`);
+  }
+
+  if (now - node.memory.firstFail >= OFFLINE_THRESHOLD) {
+
+    if (node.status !== "offline") {
+      node.status = "offline";
+      console.log(`🔴 NODE ${node.ip} OFFLINE`);
+
+      await request(UPDATE_NODE_API, {
+        id: node.id,
+        status: "offline",
+        last_check: new Date().toISOString()
+      });
+    }
+  }
 }
 
-/* ============================= */
-/* SINCRONIZA NODES COM API */
-/* ============================= */
-async function syncNodesWithAPI(apiNodes, userId) {
-    const apiNodeIds = new Set();
-    let changes = 0;
-    
-    // Mapeia nodes da API
-    for (const apiNode of apiNodes) {
-        if (!apiNode.ip) continue;
-        
-        apiNodeIds.add(apiNode.id);
-        apiNode.userId = userId;
-        
-        const existingNode = nodeState.all.get(apiNode.id);
-        
-        if (!existingNode) {
-            // Node novo
-            nodeState.all.set(apiNode.id, apiNode);
-            nodeState.unknown.add(apiNode.id);
-            changes++;
-            console.log(`   📦 Novo node detectado: ${apiNode.ip} (ID: ${apiNode.id})`);
-        } else if (
-            existingNode.ip !== apiNode.ip || 
-            existingNode.port !== apiNode.port
-        ) {
-            // Node foi modificado - ATUALIZA!
-            console.log(`   ✏️ Node ${apiNode.id} modificado:`);
-            console.log(`      IP: ${existingNode.ip} → ${apiNode.ip}`);
-            if (existingNode.port !== apiNode.port) {
-                console.log(`      Porta: ${existingNode.port || 80} → ${apiNode.port || 80}`);
-            }
-            
-            // Mantém o status atual, mas atualiza IP/porta
-            const currentStatus = existingNode.status;
-            Object.assign(existingNode, apiNode);
-            existingNode.status = currentStatus; // Preserva status
-            nodeState.all.set(apiNode.id, existingNode);
-            changes++;
-        }
-    }
-    
-    // Remove nodes que não existem mais na API
-    for (const [nodeId, node] of nodeState.all) {
-        if (node.userId === userId && !apiNodeIds.has(nodeId)) {
-            console.log(`   🗑️ Node removido: ${node.ip} (ID: ${nodeId})`);
-            nodeState.all.delete(nodeId);
-            nodeState.online.delete(nodeId);
-            nodeState.offline.delete(nodeId);
-            nodeState.unknown.delete(nodeId);
-            nodeState.lastCheck.delete(nodeId);
-            nodeState.failCount.delete(nodeId);
-            changes++;
-        }
-    }
-    
-    if (changes > 0) {
-        console.log(`   ✅ Sincronização concluída: ${changes} alterações`);
-    }
-    
-    return changes;
+/* ================= SERVER ================= */
+
+async function updateServer(server, isOnline) {
+
+  server.online = isOnline;
+
+  await request(UPDATE_SERVER_API, {
+    uid: server.uid,
+    is_online: isOnline ? 1 : 0,
+    last_update: new Date().toISOString()
+  });
 }
 
-/* ============================= */
-/* VERIFICA SERVIDORES */
-/* ============================= */
-async function checkServers() {
-    const users = await request(GET_USERS_API);
-    if (!Array.isArray(users)) return;
+/* ================= CONCORRÊNCIA ================= */
 
-    for (const user of users) {
-        if (user.monitoring_ip !== SERVER_IP) continue;
+async function processInBatches(items, handler) {
+  const queue = [...items];
 
-        const existingServer = serverState.all.get(user.uid);
-        
-        if (!existingServer) {
-            serverState.all.set(user.uid, {
-                uid: user.uid,
-                ip: user.monitoring_ip,
-                online: user.is_online === 1
-            });
-            
-            if (user.is_online === 1) {
-                serverState.online.add(user.uid);
-            } else {
-                serverState.offline.add(user.uid);
-            }
-            console.log(`📦 Novo servidor: ${user.uid}`);
-        } else if (existingServer.ip !== user.monitoring_ip) {
-            console.log(`✏️ Servidor ${user.uid} mudou IP: ${existingServer.ip} → ${user.monitoring_ip}`);
-            existingServer.ip = user.monitoring_ip;
-        }
-
-        console.log(`\n📡 Verificando servidor ${user.uid} (${user.monitoring_ip})...`);
-        const online = await pingTest(user.monitoring_ip);
-        await updateServerStatus(user.uid, online);
-        
-        await new Promise(r => setTimeout(r, 500));
+  async function worker() {
+    while (queue.length) {
+      const item = queue.shift();
+      await handler(item);
     }
+  }
+
+  const workers = [];
+  for (let i = 0; i < MAX_CONCURRENT; i++) {
+    workers.push(worker());
+  }
+
+  await Promise.all(workers);
 }
 
-/* ============================= */
-/* VERIFICA NODES - COM SINCRONIZAÇÃO */
-/* ============================= */
-async function checkNodes() {
-    const users = await request(GET_USERS_API);
-    if (!Array.isArray(users)) return;
+/* ================= LOOP ================= */
 
-    for (const user of users) {
-        if (user.monitoring_ip !== SERVER_IP) continue;
-
-        console.log(`\n📋 Processando usuário ${user.uid}...`);
-        
-        const nodes = await request(`${GET_NODES_API}?userId=${user.uid}`);
-        if (!Array.isArray(nodes)) continue;
-
-        // SINCRONIZA com a API antes de verificar
-        await syncNodesWithAPI(nodes, user.uid);
-
-        // Filtra nodes válidos para verificação
-        const validNodes = Array.from(nodeState.all.values())
-            .filter(node => node.userId === user.uid && node.ip);
-        
-        if (validNodes.length === 0) {
-            console.log(`   Nenhum node para verificar`);
-            continue;
-        }
-        
-        console.log(`\n🔍 Verificando ${validNodes.length} nodes do usuário ${user.uid}...`);
-        
-        for (let i = 0; i < validNodes.length; i++) {
-            const node = validNodes[i];
-            
-            console.log(`\n   [${i + 1}/${validNodes.length}] Node ${node.ip}:${node.port || 80} (ID: ${node.id})`);
-            
-            const online = await preciseCheck(node);
-            await updateNodeStatus(node, online, false);
-            
-            if (i < validNodes.length - 1) {
-                console.log(`   ⏱ Aguardando 1s...`);
-                await new Promise(r => setTimeout(r, 1000));
-            }
-        }
-    }
-    
-    console.log(`\n📊 ESTATÍSTICAS:`);
-    console.log(`   ├─ Total nodes: ${nodeState.all.size}`);
-    console.log(`   ├─ Online: ${nodeState.online.size}`);
-    console.log(`   ├─ Offline: ${nodeState.offline.size}`);
-    console.log(`   └─ Novos: ${nodeState.unknown.size}`);
-}
-
-/* ============================= */
-/* VERIFICAÇÃO RÁPIDA */
-/* ============================= */
-async function quickCheckOffline() {
-    const toCheck = [
-        ...Array.from(nodeState.offline),
-        ...Array.from(nodeState.unknown)
-    ].map(id => nodeState.all.get(id)).filter(node => node);
-    
-    if (toCheck.length === 0) return;
-    
-    console.log(`\n🔄 Verificação rápida: ${toCheck.length} nodes offline/novos...`);
-    
-    for (const node of toCheck) {
-        if (nodeState.processing.has(node.id)) continue;
-        
-        console.log(`   🔍 Teste rápido ${node.ip}...`);
-        const online = await quickCheck(node);
-        
-        if (online) {
-            console.log(`   ✅ Node ${node.ip} respondeu, confirmando...`);
-            const fullOnline = await preciseCheck(node);
-            await updateNodeStatus(node, fullOnline, true);
-        }
-        
-        await new Promise(r => setTimeout(r, 500));
-    }
-}
-
-async function quickCheckServers() {
-    const offlineServers = Array.from(serverState.offline)
-        .map(id => serverState.all.get(id))
-        .filter(server => server);
-    
-    if (offlineServers.length === 0) return;
-    
-    console.log(`\n🔄 Verificando ${offlineServers.length} servidores offline...`);
-    
-    for (const server of offlineServers) {
-        if (serverState.processing.has(server.uid)) continue;
-        
-        const online = await pingTest(server.ip);
-        if (online) {
-            console.log(`   ✅ Servidor ${server.uid} respondeu`);
-            await updateServerStatus(server.uid, true);
-        }
-        
-        await new Promise(r => setTimeout(r, 500));
-    }
-}
-
-/* ============================= */
-/* LOOP PRINCIPAL */
-/* ============================= */
 async function run() {
-    console.log("\n" + "=".repeat(60));
-    console.log("🔄 VERIFICAÇÃO COMPLETA:", new Date().toLocaleString("pt-BR"));
-    console.log("=".repeat(60));
 
-    try {
-        await checkServers();
-        await checkNodes();
-    } catch (err) {
-        console.log("❌ ERRO GERAL:", err.message);
+  console.log("\n🔄 Ciclo:", new Date().toLocaleString("pt-BR"));
+
+  const users = await request(GET_USERS_API);
+  if (!Array.isArray(users)) return;
+
+  for (const user of users) {
+
+    if (user.monitoring_ip !== SERVER_IP) continue;
+
+    let server = state.servers.get(user.uid);
+
+    if (!server) {
+      server = {
+        uid: user.uid,
+        ip: user.monitoring_ip,
+        online: true
+      };
+      state.servers.set(user.uid, server);
     }
+
+    const serverOnline = await testHost(server.ip);
+    await updateServer(server, serverOnline);
+
+    const nodes = await request(`${GET_NODES_API}?userId=${user.uid}`);
+    if (!Array.isArray(nodes)) continue;
+
+    const apiIds = new Set();
+
+    for (const apiNode of nodes) {
+
+      if (!apiNode.ip) continue;
+
+      apiIds.add(apiNode.id);
+
+      const existing = state.nodes.get(apiNode.id);
+
+      if (!existing) {
+        state.nodes.set(apiNode.id, { ...apiNode });
+      } else if (existing.ip !== apiNode.ip || existing.port !== apiNode.port) {
+
+        console.log(`🔄 IP alterado ${existing.ip} → ${apiNode.ip}`);
+
+        existing.ip = apiNode.ip;
+        existing.port = apiNode.port;
+        existing.memory = null;
+
+        // Teste imediato ao alterar IP
+        const immediate = await testHost(existing.ip, existing.port || 80);
+
+        existing.status = immediate ? "online" : "offline";
+
+        await request(UPDATE_NODE_API, {
+          id: existing.id,
+          status: existing.status
+        });
+      }
+    }
+
+    for (const [id] of state.nodes) {
+      if (!apiIds.has(id)) {
+        state.nodes.delete(id);
+      }
+    }
+
+    await processInBatches(nodes.filter(n => n.ip), async (apiNode) => {
+      const node = state.nodes.get(apiNode.id);
+      const isOnline = await testHost(node.ip, node.port || 80);
+      await updateNode(node, isOnline);
+    });
+  }
+
+  console.log("✅ Ciclo finalizado");
 }
 
-/* ============================= */
-/* INICIALIZAÇÃO */
-/* ============================= */
-async function initialize() {
-    console.log("\n🚀 Inicializando monitor com sincronização automática...");
-    console.log("📋 Qualquer alteração de IP será detectada no próximo ciclo!");
-    
-    await run();
-    
-    setInterval(run, CHECK_INTERVAL);
-    
-    setInterval(async () => {
-        try {
-            await quickCheckOffline();
-            await quickCheckServers();
-        } catch (err) {
-            console.log("❌ Erro no quick check:", err.message);
-        }
-    }, 5000);
-    
-    console.log("✅ Monitor rodando!");
+/* ================= START ================= */
+
+async function init() {
+  await run();
+  setInterval(run, CHECK_INTERVAL);
 }
 
-initialize().catch(console.error);
+init().catch(console.error);
 
-process.on('SIGINT', () => {
-    console.log('\n\n📊 ESTATÍSTICAS FINAIS:');
-    console.log(`   ├─ Servidores: ${serverState.all.size}`);
-    console.log(`   ├─ Nodes totais: ${nodeState.all.size}`);
-    console.log(`   ├─ Nodes online: ${nodeState.online.size}`);
-    console.log(`   └─ Nodes offline: ${nodeState.offline.size}`);
-    console.log('\n👋 Monitor encerrado');
-    process.exit();
+process.on("SIGINT", () => {
+  console.log("\n👋 Monitor encerrado");
+  process.exit();
 });
-            
-    
     
 EOF
 }
