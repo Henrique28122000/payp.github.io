@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# -─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # CORES
 # ─────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -71,7 +71,7 @@ install_basic_deps() {
 }
 
 # ─────────────────────────────────────────────────────────────
-# FUNÇÃO PARA VALIDAR CHAVE DE INSTALAÇÃO (SEM USAR JQ)
+# FUNÇÃO PARA VALIDAR CHAVE DE INSTALAÇÃO
 # ─────────────────────────────────────────────────────────────
 validate_installation_key() {
     clear
@@ -89,7 +89,7 @@ validate_installation_key() {
     echo ""
     echo -e "${CYAN}📡 Validando chave...${NC}"
     
-    # URL base para validação (altere para sua URL real)
+    # URL base para validação
     BASE_URL="https://nexyra.myftp.biz/netpulse"
     
     # Valida a chave e obtém o link base
@@ -104,9 +104,8 @@ validate_installation_key() {
         error "Falha ao conectar com o servidor"
     fi
     
-    # Extrai o status e o link base usando grep/sed (fallback case)
+    # Extrai o status e o link base
     if command -v jq >/dev/null 2>&1; then
-        # Usa jq se disponível
         STATUS=$(echo "$RESPONSE" | jq -r '.status // "error"')
         
         if [ "$STATUS" != "success" ]; then
@@ -118,17 +117,14 @@ validate_installation_key() {
         BASE_LINK=$(echo "$RESPONSE" | jq -r '.base_link // empty')
         
     else
-        # Fallback: usa grep e sed para extrair os valores
         if echo "$RESPONSE" | grep -q '"status"[[:space:]]*:[[:space:]]*"success"'; then
             STATUS="success"
-            # Extrai o base_link
             BASE_LINK=$(echo "$RESPONSE" | grep -o '"base_link"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/"base_link"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/')
             
             if [ -z "$BASE_LINK" ]; then
                 error "Link base não encontrado na resposta"
             fi
         else
-            # Tenta extrair mensagem de erro
             ERROR_MSG=$(echo "$RESPONSE" | grep -o '"message"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/"message"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/')
             ERROR_MSG=${ERROR_MSG:-"Chave inválida"}
             echo -e "${RED}❌ $ERROR_MSG${NC}"
@@ -172,6 +168,56 @@ validate_installation_key() {
     fi
     
     sleep 2
+}
+
+# ─────────────────────────────────────────────────────────────
+# FUNÇÃO PARA CRIAR ARQUIVO DE CONFIGURAÇÃO
+# ─────────────────────────────────────────────────────────────
+create_config_file() {
+    log "📝 Criando arquivo de configuração..."
+    
+    cat > "$CONFIG_FILE" <<EOF
+{
+  "apis": {
+    "get_users": "$GET_USERS_API",
+    "get_nodes": "$GET_NODES_API",
+    "update_node": "$UPDATE_NODE_API",
+    "update_server": "$UPDATE_SERVER_API"
+  },
+  "check_interval_ms": 30000,
+  "timeout_ms": 1500,
+  "offline_threshold_ms": 60000,
+  "max_concurrent": 10,
+  "installation_key": "$INSTALL_KEY",
+  "installed_at": "$(date +%Y-%m-%dT%H:%M:%S%z)",
+  "server_ip": "$(hostname -I | awk '{print $1}')"
+}
+EOF
+    
+    log "✅ Arquivo de configuração criado"
+}
+
+# ─────────────────────────────────────────────────────────────
+# FUNÇÃO PARA INSTALAR NODE.JS
+# ─────────────────────────────────────────────────────────────
+install_nodejs() {
+    echo -e "${BLUE}📦 Instalando Node.js...${NC}"
+    
+    if command -v node >/dev/null 2>&1; then
+        NODE_VERSION=$(node -v)
+        echo -e "${GREEN}✅ Node.js já instalado: $NODE_VERSION${NC}"
+        return
+    fi
+    
+    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - > /dev/null 2>&1
+    apt install -y nodejs > /dev/null 2>&1
+    
+    if command -v node >/dev/null 2>&1; then
+        NODE_VERSION=$(node -v)
+        echo -e "${GREEN}✅ Node.js $NODE_VERSION instalado${NC}"
+    else
+        error "Falha ao instalar Node.js"
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -254,8 +300,9 @@ uninstall() {
 # CRIAR ARQUIVO JS
 # ─────────────────────────────────────────────────────────────
 create_js_file() {
+    log "📝 Criando arquivo monitor.js..."
+    
     cat > "$APP_DIR/$JS_FILE" <<'EOF'
-           
 const { exec } = require("child_process");
 const fs = require("fs");
 const http = require("http");
@@ -383,7 +430,6 @@ async function testHost(ip, port = 80) {
 /* ================= NODE ================= */
 
 async function updateNode(node, isOnline) {
-
   const now = Date.now();
 
   if (!node.memory) {
@@ -393,7 +439,6 @@ async function updateNode(node, isOnline) {
   }
 
   if (isOnline) {
-
     node.memory.firstFail = null;
 
     if (node.status !== "online") {
@@ -406,7 +451,6 @@ async function updateNode(node, isOnline) {
         last_online: new Date().toISOString()
       });
     }
-
     return;
   }
 
@@ -416,7 +460,6 @@ async function updateNode(node, isOnline) {
   }
 
   if (now - node.memory.firstFail >= OFFLINE_THRESHOLD) {
-
     if (node.status !== "offline") {
       node.status = "offline";
       console.log(`🔴 NODE ${node.ip} OFFLINE`);
@@ -433,7 +476,6 @@ async function updateNode(node, isOnline) {
 /* ================= SERVER ================= */
 
 async function updateServer(server, isOnline) {
-
   server.online = isOnline;
 
   await request(UPDATE_SERVER_API, {
@@ -466,14 +508,12 @@ async function processInBatches(items, handler) {
 /* ================= LOOP ================= */
 
 async function run() {
-
   console.log("\n🔄 Ciclo:", new Date().toLocaleString("pt-BR"));
 
   const users = await request(GET_USERS_API);
   if (!Array.isArray(users)) return;
 
   for (const user of users) {
-
     if (user.monitoring_ip !== SERVER_IP) continue;
 
     let server = state.servers.get(user.uid);
@@ -496,7 +536,6 @@ async function run() {
     const apiIds = new Set();
 
     for (const apiNode of nodes) {
-
       if (!apiNode.ip) continue;
 
       apiIds.add(apiNode.id);
@@ -506,7 +545,6 @@ async function run() {
       if (!existing) {
         state.nodes.set(apiNode.id, { ...apiNode });
       } else if (existing.ip !== apiNode.ip || existing.port !== apiNode.port) {
-
         console.log(`🔄 IP alterado ${existing.ip} → ${apiNode.ip}`);
 
         existing.ip = apiNode.ip;
@@ -515,7 +553,6 @@ async function run() {
 
         // Teste imediato ao alterar IP
         const immediate = await testHost(existing.ip, existing.port || 80);
-
         existing.status = immediate ? "online" : "offline";
 
         await request(UPDATE_NODE_API, {
@@ -554,14 +591,17 @@ process.on("SIGINT", () => {
   console.log("\n👋 Monitor encerrado");
   process.exit();
 });
-    
 EOF
+
+    log "✅ Arquivo monitor.js criado"
 }
 
 # ─────────────────────────────────────────────────────────────
 # CRIAR SCRIPTS AUXILIARES
 # ─────────────────────────────────────────────────────────────
 create_aux_scripts() {
+    log "📝 Criando scripts auxiliares..."
+    
     cat > "$APP_DIR/start.sh" <<'EOF'
 #!/bin/bash
 echo -e "\033[0;32m▶️ Iniciando Nexyra Link...\033[0m"
@@ -616,12 +656,15 @@ read -p "Pressione Enter para voltar..."
 EOF
 
     chmod +x "$APP_DIR"/*.sh
+    log "✅ Scripts auxiliares criados"
 }
 
 # ─────────────────────────────────────────────────────────────
 # CRIAR MENU PRINCIPAL
 # ─────────────────────────────────────────────────────────────
 create_menu() {
+    log "📝 Criando menu principal..."
+    
     cat > "$APP_DIR/menu.sh" <<'EOF'
 #!/bin/bash
 APP_DIR="/opt/nexyra-link"
@@ -690,7 +733,115 @@ while true; do
     esac
 done
 EOF
+
     chmod +x "$APP_DIR/menu.sh"
+    log "✅ Menu principal criado"
+}
+
+# ─────────────────────────────────────────────────────────────
+# CRIAR ARQUIVO DE SERVIÇO SYSTEMD
+# ─────────────────────────────────────────────────────────────
+create_service_file() {
+    log "📝 Criando arquivo de serviço systemd..."
+    
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Nexyra Link Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$APP_DIR
+ExecStart=/usr/bin/node $APP_DIR/$JS_FILE
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nexyra-link
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    log "✅ Arquivo de serviço criado"
+}
+
+# ─────────────────────────────────────────────────────────────
+# CRIAR COMANDO DE MENU
+# ─────────────────────────────────────────────────────────────
+create_menu_command() {
+    log "📝 Criando comando 'nexyra'..."
+    
+    cat > "$MENU_CMD" <<'EOF'
+#!/bin/bash
+/opt/nexyra-link/menu.sh
+EOF
+
+    chmod +x "$MENU_CMD"
+    log "✅ Comando 'nexyra' criado"
+}
+
+# ─────────────────────────────────────────────────────────────
+# CONFIGURAR AUTO COMPLETION
+# ─────────────────────────────────────────────────────────────
+setup_autocompletion() {
+    if ! grep -q "# Nexyra Link" /root/.bashrc; then
+        echo "" >> /root/.bashrc
+        echo "# Nexyra Link" >> /root/.bashrc
+        echo "alias nexyra='/usr/local/bin/nexyra'" >> /root/.bashrc
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# INICIAR SERVIÇO
+# ─────────────────────────────────────────────────────────────
+start_service() {
+    log "🚀 Iniciando serviço..."
+    
+    systemctl daemon-reload
+    systemctl enable nexyra-link
+    systemctl start nexyra-link
+    
+    sleep 3
+    
+    if systemctl is-active --quiet nexyra-link; then
+        log "✅ Serviço iniciado com sucesso"
+    else
+        warning "⚠️  Serviço pode não ter iniciado corretamente"
+        systemctl status nexyra-link --no-pager
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# MOSTRA RESUMO DA INSTALAÇÃO
+# ─────────────────────────────────────────────────────────────
+show_summary() {
+    clear
+    echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║    INSTALAÇÃO CONCLUÍDA COM SUCESSO   ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${WHITE}📋 INFORMAÇÕES:${NC}"
+    echo -e "  • Diretório: ${CYAN}$APP_DIR${NC}"
+    echo -e "  • Arquivo JS: ${CYAN}$JS_FILE${NC}"
+    echo -e "  • Config: ${CYAN}$CONFIG_FILE${NC}"
+    echo -e "  • Serviço: ${CYAN}nexyra-link${NC}"
+    echo ""
+    echo -e "${WHITE}📝 COMANDOS:${NC}"
+    echo -e "  • Menu: ${YELLOW}nexyra${NC}"
+    echo -e "  • Status: ${YELLOW}systemctl status nexyra-link${NC}"
+    echo -e "  • Logs: ${YELLOW}journalctl -u nexyra-link -f${NC}"
+    echo ""
+    echo -e "${WHITE}🔗 APIs CONFIGURADAS:${NC}"
+    echo -e "  • GET Users: ${CYAN}$GET_USERS_API${NC}"
+    echo -e "  • GET Nodes: ${CYAN}$GET_NODES_API${NC}"
+    echo -e "  • UPDATE Node: ${CYAN}$UPDATE_NODE_API${NC}"
+    echo -e "  • UPDATE Server: ${CYAN}$UPDATE_SERVER_API${NC}"
+    echo ""
+    echo -e "${GREEN}✅ Monitor está rodando!${NC}"
+    echo -e "${YELLOW}➡️  Digite 'nexyra' para acessar o menu${NC}"
+    echo ""
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -706,110 +857,67 @@ install() {
     # Valida a chave e obtém o link base
     validate_installation_key
     
+    # Limpa instalação anterior
     clean_installation
     
-    if [ "$EUID" -ne 0 ]; then
-        error "❌ Execute como root"
-    fi
-
-    echo "📦 Instalando dependências adicionais..."
-    apt install -y sudo > /dev/null 2>&1
-
-    if ! command -v node >/dev/null 2>&1; then
-        echo "📦 Instalando Node.js..."
-        curl -fsSL https://deb.nodesource.com/setup_18.x | bash - > /dev/null 2>&1
-        apt install -y nodejs > /dev/null 2>&1
-    fi
-
-    NODE_PATH=$(which node)
-    [ -z "$NODE_PATH" ] && [ -f "/usr/bin/node" ] && NODE_PATH="/usr/bin/node"
+    # Cria diretórios
+    mkdir -p "$APP_DIR"
+    mkdir -p "$BACKUP_DIR"
+    mkdir -p "$LOG_DIR"
     
-    echo "✅ Node.js $($NODE_PATH -v) instalado"
-
-    mkdir -p "$APP_DIR" "$BACKUP_DIR" "$LOG_DIR"
+    # Instala Node.js
+    install_nodejs
     
-    create_js_file
+    # Cria arquivos
     create_config_file
+    create_js_file
     create_aux_scripts
     create_menu
-
-    ln -sf "$APP_DIR/menu.sh" "$MENU_CMD"
-    chmod +x "$MENU_CMD"
-
-    cat > "$SERVICE_FILE" <<EOF
-[Unit]
-Description=Nexyra Link Monitor
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=$APP_DIR
-ExecStart=$NODE_PATH $APP_DIR/$JS_FILE
-Restart=always
-RestartSec=5
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable nexyra-link > /dev/null 2>&1
-    systemctl start nexyra-link > /dev/null 2>&1
-
-    sleep 2
-    if systemctl is-active --quiet nexyra-link; then
-        echo "✅ Serviço rodando!"
-    fi
-
-    if ! grep -q "nexyra" /root/.bashrc 2>/dev/null; then
-        echo "" >> /root/.bashrc
-        echo "# Nexyra Link" >> /root/.bashrc
-        echo "echo '🔗 Digite nexyra para abrir o monitor'" >> /root/.bashrc
-    fi
-
-    clear
-    echo "════════════════════════════════════════"
-    echo "    INSTALAÇÃO CONCLUÍDA COM SUCESSO"
-    echo "════════════════════════════════════════"
-    echo ""
-    echo "📂 Diretório: $APP_DIR"
-    echo "🚀 Serviço: ATIVO"
-    echo "⏱️  Intervalo: 30 segundos"
-    echo ""
-    echo "📋 APIs configuradas:"
-    echo "  • GET Users: $GET_USERS_API"
-    echo "  • GET Nodes: $GET_NODES_API"
-    echo "  • UPDATE Node: $UPDATE_NODE_API"
-    echo "  • UPDATE Server: $UPDATE_SERVER_API"
-    echo ""
-    echo "👉 Digite 'nexyra' para começar!"
-    echo ""
+    create_service_file
+    create_menu_command
     
-    read -p "❓ Abrir menu agora? (s/N): " -n 1 -r
-    echo ""
-    if [[ $REPLY =~ ^[Ss]$ ]]; then
-        cd "$APP_DIR" && ./menu.sh
-    fi
+    # Configura auto completion
+    setup_autocompletion
+    
+    # Inicia serviço
+    start_service
+    
+    # Mostra resumo
+    show_summary
 }
 
 # ─────────────────────────────────────────────────────────────
-# MENU PRINCIPAL
+# MENU PRINCIPAL DO INSTALADOR
 # ─────────────────────────────────────────────────────────────
-clear
-echo "════════════════════════════════════════"
-echo "     NEXYRA LINK - INSTALADOR v3.0"
-echo "════════════════════════════════════════"
-echo ""
-echo "1) 🚀  Instalar Nexyra Link"
-echo "2) 🗑️   Desinstalar"
-echo "0) 🚪  Sair"
-echo ""
-read -p "👉 Escolha: " opt
+main_menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
+        echo -e "${BLUE}║      NEXYRA LINK - INSTALADOR         ║${NC}"
+        echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+        echo ""
+        echo "1) 🚀 INSTALAR"
+        echo "2) 🗑️  DESINSTALAR"
+        echo "0) ❌ SAIR"
+        echo ""
+        read -p "👉 Escolha: " option
+        
+        case $option in
+            1) install ;;
+            2) uninstall ;;
+            0) 
+                echo -e "${GREEN}Até logo!${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Opção inválida${NC}"
+                sleep 2
+                ;;
+        esac
+    done
+}
 
-case $opt in
-    1) install ;;
-    2) uninstall ;;
-    0) echo "Até logo!" && exit 0 ;;
-    *) echo "Opção inválida" && exit 1 ;;
-esac 
+# ─────────────────────────────────────────────────────────────
+# EXECUTAR MENU PRINCIPAL
+# ─────────────────────────────────────────────────────────────
+main_menu
