@@ -90,7 +90,7 @@ validate_installation_key() {
     echo -e "${CYAN}📡 Validando chave...${NC}"
     
     # URL base para validação
-    BASE_URL="https://nexyraapi.phfinance.site/netpulse"
+    BASE_URL="https://api.nexyratech.com.br/netpulse"
     
     # Valida a chave e obtém o link base
     RESPONSE=$(curl -s -X POST \
