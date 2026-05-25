@@ -706,4 +706,218 @@ while true; do
                 ms=$((min * 60000))
                 jq ".check_interval_ms=$ms" "$APP_DIR/config.json" > tmp && mv tmp "$APP_DIR/config.json"
                 echo "✅ Alterado para $min minutos"
-          
+                echo "Reinicie o monitor (opção 3)"
+            fi
+            sleep 2
+            ;;
+        7) 
+            GET_USERS=$(jq -r '.apis.get_users' "$APP_DIR/config.json")
+            GET_NODES=$(jq -r '.apis.get_nodes' "$APP_DIR/config.json")
+            echo "🔍 Testando APIs..."
+            echo ""
+            echo "GET Users: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$GET_USERS")"
+            echo "GET Nodes: $(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$GET_NODES")"
+            read -p "Enter..."
+            ;;
+        8)
+            echo "📋 CONFIGURAÇÃO ATUAL:"
+            echo ""
+            jq '.' "$APP_DIR/config.json"
+            echo ""
+            read -p "Enter..."
+            ;;
+        9) systemctl enable nexyra-link && echo "✅ Auto start ativado" && sleep 2 ;;
+        10) systemctl disable nexyra-link && echo "❌ Auto start desativado" && sleep 2 ;;
+        0) echo "Até logo!" && exit 0 ;;
+        *) echo "Opção inválida" && sleep 2 ;;
+    esac
+done
+EOF
+
+    chmod +x "$APP_DIR/menu.sh"
+    log "✅ Menu principal criado"
+}
+
+# ─────────────────────────────────────────────────────────────
+# CRIAR ARQUIVO DE SERVIÇO SYSTEMD
+# ─────────────────────────────────────────────────────────────
+create_service_file() {
+    log "📝 Criando arquivo de serviço systemd..."
+    
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=Nexyra Link Monitor
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$APP_DIR
+ExecStart=/usr/bin/node $APP_DIR/$JS_FILE
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nexyra-link
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    log "✅ Arquivo de serviço criado"
+}
+
+# ─────────────────────────────────────────────────────────────
+# CRIAR COMANDO DE MENU
+# ─────────────────────────────────────────────────────────────
+create_menu_command() {
+    log "📝 Criando comando 'nexyra'..."
+    
+    cat > "$MENU_CMD" <<'EOF'
+#!/bin/bash
+/opt/nexyra-link/menu.sh
+EOF
+
+    chmod +x "$MENU_CMD"
+    log "✅ Comando 'nexyra' criado"
+}
+
+# ─────────────────────────────────────────────────────────────
+# CONFIGURAR AUTO COMPLETION
+# ─────────────────────────────────────────────────────────────
+setup_autocompletion() {
+    if ! grep -q "# Nexyra Link" /root/.bashrc; then
+        echo "" >> /root/.bashrc
+        echo "# Nexyra Link" >> /root/.bashrc
+        echo "alias nexyra='/usr/local/bin/nexyra'" >> /root/.bashrc
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# INICIAR SERVIÇO
+# ─────────────────────────────────────────────────────────────
+start_service() {
+    log "🚀 Iniciando serviço..."
+    
+    systemctl daemon-reload
+    systemctl enable nexyra-link
+    systemctl start nexyra-link
+    
+    sleep 3
+    
+    if systemctl is-active --quiet nexyra-link; then
+        log "✅ Serviço iniciado com sucesso"
+    else
+        warning "⚠️  Serviço pode não ter iniciado corretamente"
+        systemctl status nexyra-link --no-pager
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────
+# MOSTRA RESUMO DA INSTALAÇÃO
+# ─────────────────────────────────────────────────────────────
+show_summary() {
+    clear
+    echo -e "${GREEN}╔════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║    INSTALAÇÃO CONCLUÍDA COM SUCESSO   ║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${WHITE}📋 INFORMAÇÕES:${NC}"
+    echo -e "  • Diretório: ${CYAN}$APP_DIR${NC}"
+    echo -e "  • Arquivo JS: ${CYAN}$JS_FILE${NC}"
+    echo -e "  • Config: ${CYAN}$CONFIG_FILE${NC}"
+    echo -e "  • Serviço: ${CYAN}nexyra-link${NC}"
+    echo ""
+    echo -e "${WHITE}📝 COMANDOS:${NC}"
+    echo -e "  • Menu: ${YELLOW}nexyra${NC}"
+    echo -e "  • Status: ${YELLOW}systemctl status nexyra-link${NC}"
+    echo -e "  • Logs: ${YELLOW}journalctl -u nexyra-link -f${NC}"
+    echo ""
+    echo -e "${WHITE}🔗 APIs CONFIGURADAS:${NC}"
+    echo -e "  • GET Users: ${CYAN}$GET_USERS_API${NC}"
+    echo -e "  • GET Nodes: ${CYAN}$GET_NODES_API${NC}"
+    echo -e "  • UPDATE Node: ${CYAN}$UPDATE_NODE_API${NC}"
+    echo -e "  • UPDATE Server: ${CYAN}$UPDATE_SERVER_API${NC}"
+    echo ""
+    echo -e "${GREEN}✅ Monitor está rodando!${NC}"
+    echo -e "${YELLOW}➡️  Digite 'nexyra' para acessar o menu${NC}"
+    echo ""
+}
+
+# ─────────────────────────────────────────────────────────────
+# INSTALAÇÃO PRINCIPAL
+# ─────────────────────────────────────────────────────────────
+install() {
+    clear
+    echo -e "${BLUE}🚀 Iniciando instalação do Nexyra Link Monitor${NC}"
+    
+    # Primeiro instala as dependências básicas
+    install_basic_deps
+    
+    # Valida a chave e obtém o link base
+    validate_installation_key
+    
+    # Limpa instalação anterior
+    clean_installation
+    
+    # Cria diretórios
+    mkdir -p "$APP_DIR"
+    mkdir -p "$BACKUP_DIR"
+    mkdir -p "$LOG_DIR"
+    
+    # Instala Node.js
+    install_nodejs
+    
+    # Cria arquivos
+    create_config_file
+    create_js_file
+    create_aux_scripts
+    create_menu
+    create_service_file
+    create_menu_command
+    
+    # Configura auto completion
+    setup_autocompletion
+    
+    # Inicia serviço
+    start_service
+    
+    # Mostra resumo
+    show_summary
+}
+
+# ─────────────────────────────────────────────────────────────
+# MENU PRINCIPAL DO INSTALADOR
+# ─────────────────────────────────────────────────────────────
+main_menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
+        echo -e "${BLUE}║      NEXYRA LINK - INSTALADOR         ║${NC}"
+        echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+        echo ""
+        echo "1) 🚀 INSTALAR"
+        echo "2) 🗑️  DESINSTALAR"
+        echo "0) ❌ SAIR"
+        echo ""
+        read -p "👉 Escolha: " option
+        
+        case $option in
+            1) install ;;
+            2) uninstall ;;
+            0) 
+                echo -e "${GREEN}Até logo!${NC}"
+                exit 0
+                ;;
+            *)
+                echo -e "${RED}Opção inválida${NC}"
+                sleep 2
+                ;;
+        esac
+    done
+}
+
+# ─────────────────────────────────────────────────────────────
+# EXECUTAR MENU PRINCIPAL
+# ─────────────────────────────────────────────────────────────
+main_menu
