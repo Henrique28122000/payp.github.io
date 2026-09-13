@@ -1,230 +1,97 @@
-﻿#!/bin/bash
-set -e
-VERSION="2.4.0"
+#!/usr/bin/env bash
+set -Eeuo pipefail
+VERSION="2.5.1"
 APP_DIR="/opt/nexyra-link"
 CONFIG="$APP_DIR/config.json"
-SERVICE="/etc/systemd/system/nexyra-link.service"
+API_DEFAULT="https://api.nexyratech.com.br/netpulse"
+die(){ echo "[ERRO] $*" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || die "Execute como root."
 
-need_root() {
-  if [ "$(id -u)" != "0" ]; then echo "Execute como root"; exit 1; fi
+install_deps(){
+  echo "[Nexyra] Instalando dependencias..."
+  if command -v apt-get >/dev/null; then
+    apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq iputils-ping nodejs npm ca-certificates
+  elif command -v dnf >/dev/null; then
+    dnf install -y curl jq iputils nodejs npm ca-certificates
+  else
+    die "Instale curl, jq, ping, npm e Node.js 18+."
+  fi
+  [ "$(node -p 'Number(process.versions.node.split(".")[0])')" -ge 18 ] || die "Node.js 18+ obrigatorio."
 }
 
-install_deps() {
-  apt update -y >/dev/null 2>&1 || true
-  apt install -y curl jq iputils-ping openssh-client sshpass nodejs npm >/dev/null 2>&1 || true
-}
-
-read_config() {
-  read -p "URL base da API [https://api.nexyratech.com.br/netpulse]: " BASE_URL
-  BASE_URL=${BASE_URL:-https://api.nexyratech.com.br/netpulse}
-  read -p "Chave de instalacao do cliente: " INSTALL_KEY
-  [ -z "$INSTALL_KEY" ] && echo "Chave obrigatoria" && exit 1
+configure(){
+  local old_url="" old_key=""
+  [ -f "$CONFIG" ] && old_url="$(jq -r '.base_url // empty' "$CONFIG" 2>/dev/null || true)" && old_key="$(jq -r '.key // empty' "$CONFIG" 2>/dev/null || true)"
+  read -r -p "URL da API [${old_url:-$API_DEFAULT}]: " BASE_URL
+  BASE_URL="${BASE_URL:-${old_url:-$API_DEFAULT}}"; BASE_URL="${BASE_URL%/}"
+  read -r -p "Chave [Enter mantem a atual]: " INSTALL_KEY; INSTALL_KEY="${INSTALL_KEY:-$old_key}"
+  [ -n "$INSTALL_KEY" ] || die "Chave obrigatoria."
+  local response
+  response="$(curl -fsS --max-time 20 -H 'Content-Type: application/json' -d "$(jq -nc --arg key "$INSTALL_KEY" '{key:$key}')" "$BASE_URL/validate_key.php")" || die "API indisponivel."
+  [ "$(printf %s "$response"|jq -r '.success // false')" = true ] || die "$(printf %s "$response"|jq -r '.message // "Chave recusada"')"
   mkdir -p "$APP_DIR"
-  cat > "$CONFIG" <<EOF
-{
-  "base_url": "$BASE_URL",
-  "key": "$INSTALL_KEY",
-  "version": "$VERSION",
-  "interval_ms": 30000,
-  "mikrotiks": []
-}
-EOF
+  jq -n --arg u "$BASE_URL" --arg k "$INSTALL_KEY" --arg v "$VERSION" '{base_url:$u,key:$k,version:$v,interval_ms:30000,offline_threshold_ms:60000}' > "$CONFIG"
+  chmod 600 "$CONFIG"
 }
 
-create_monitor() {
-cat > "$APP_DIR/monitor.js" <<'EOF'
-const fs = require('fs');
-const { execFile } = require('child_process');
-const net = require('net');
-const cfgPath = '/opt/nexyra-link/config.json';
-const statePath = '/opt/nexyra-link/node-state.json';
-const queuePath = '/opt/nexyra-link/history-queue.json';
-const archivePath = '/opt/nexyra-link/node-history.jsonl';
-const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
-console.log(`Nexyra Link Agent v${cfg.version || '2.4.0'}`);
-
-function readLocal(path, fallback) {
-  try { return JSON.parse(fs.readFileSync(path, 'utf8')); } catch { return fallback; }
+write_monitor(){
+cat > "$APP_DIR/monitor.js" <<'NODE'
+'use strict';
+const fs=require('fs'),net=require('net'),{execFile}=require('child_process');
+const {RouterOSAPI}=require('node-routeros');
+const dir='/opt/nexyra-link/',cfg=JSON.parse(fs.readFileSync(dir+'config.json','utf8')),base=cfg.base_url.replace(/\/$/,'');
+const sf=dir+'node-state.json',qf=dir+'history-queue.json',hf=dir+'node-history.jsonl';
+const read=(p,d)=>{try{return JSON.parse(fs.readFileSync(p,'utf8'))}catch{return d}};
+const write=(p,v)=>{fs.writeFileSync(p+'.tmp',JSON.stringify(v));fs.renameSync(p+'.tmp',p)};
+let states=read(sf,{}),queue=read(qf,[]),running=false;
+async function req(url,opt={}){const c=new AbortController(),t=setTimeout(()=>c.abort(),15000);try{const r=await fetch(url,{...opt,signal:c.signal}),s=(await r.text()).replace(/^\uFEFF+/,'').trim(),j=s?JSON.parse(s):{};if(!r.ok||j.success===false)throw Error(j.message||('HTTP '+r.status));return j}finally{clearTimeout(t)}}
+const post=(a,d)=>req(base+'/api.php?action='+a,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
+const update=d=>req(base+'/update_node_1.php',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...d,key:cfg.key})});
+const payload=()=>req(base+'/api.php?action=get_monitor_payload&key='+encodeURIComponent(cfg.key));
+const ping=h=>new Promise(ok=>execFile('ping',['-c','1','-W','2',h],{timeout:4000},e=>ok(!e)));
+const tcp=(h,p)=>new Promise(ok=>{const s=new net.Socket();let done=false,end=v=>{if(!done){done=true;s.destroy();ok(v)}};s.setTimeout(2200);s.once('connect',()=>end(true));s.once('timeout',()=>end(false));s.once('error',()=>end(false));s.connect(p,h)});
+async function detect(h){if(await ping(h))return{online:true,port:null};for(const p of [80,443,22,8291,8728,8080,8443,53])if(await tcp(h,p))return{online:true,port:p};return{online:false,port:null}}
+function archive(e){fs.appendFileSync(hf,JSON.stringify(e)+'\n');if(fs.statSync(hf).size>25*1024*1024){const x=fs.readFileSync(hf,'utf8').trim().split('\n').slice(-100000);fs.writeFileSync(hf+'.tmp',x.join('\n')+'\n');fs.renameSync(hf+'.tmp',hf)}}
+async function flush(){while(queue.length)try{await update(queue[0]);queue.shift();write(qf,queue)}catch(e){console.error('Fila:',e.message);return}}
+async function check(n,uid){const now=Date.now(),r=await detect(n.ip),old=states[n.id]||{status:n.status||'unknown',failed:null};let status='online',failed=null;if(!r.online){failed=old.failed||now;status=now-failed>=(cfg.offline_threshold_ms||60000)?'offline':old.status}const e={id:Number(n.id),uid,status,detected_port:r.port,checked_at:new Date().toISOString()};if(status!==old.status){queue.push(e);archive({...e,old_status:old.status});write(qf,queue)}else try{await update(e)}catch(x){console.error('Node '+n.id+':',x.message)}states[n.id]={status,failed};write(sf,states)}
+async function pppoe(m){const conn=new RouterOSAPI({host:m.host,port:Number(m.port||8728),user:m.username,password:String(m.password),tls:Boolean(Number(m.use_ssl)),timeout:10,keepalive:false});try{await conn.connect();const rows=await conn.write('/ppp/active/print');return rows.map(x=>({username:x.name,address:x.address||null,uptime:x.uptime||null,caller_id:x['caller-id']||null,service:x.service||null}))}finally{try{conn.close()}catch{}}}
+async function tick(){if(running)return;running=true;try{await flush();const d=await payload();await post('monitoring_heartbeat',{uid:d.user.uid,server_ip:d.request_ip});for(const n of d.nodes||[])await check(n,d.user.uid);await flush();if(!d.credentials_allowed&&(d.mikrotiks||[]).length)console.error('Credenciais bloqueadas para '+d.request_ip);for(const m of d.mikrotiks||[])if(m.password)try{await post('update_pppoe_clients',{key:cfg.key,mikrotik_id:m.id,clients:await pppoe(m)})}catch(e){console.error('MikroTik '+m.name+':',e.message);try{await post('mikrotik_error',{key:cfg.key,mikrotik_id:m.id,error:e.message})}catch{}}}catch(e){console.error(new Date().toISOString(),e.message)}finally{running=false}}
+console.log('Nexyra Link Agent v'+cfg.version);tick();setInterval(tick,cfg.interval_ms||30000);
+NODE
+node --check "$APP_DIR/monitor.js" >/dev/null
+cd "$APP_DIR"
+[ -f package.json ] || npm init -y >/dev/null 2>&1
+npm install --omit=dev --save-exact node-routeros@1.6.9
 }
 
-function writeLocal(path, value) {
-  const temporary = `${path}.tmp`;
-  fs.writeFileSync(temporary, JSON.stringify(value));
-  fs.renameSync(temporary, path);
-}
-
-let nodeState = readLocal(statePath, {});
-let historyQueue = readLocal(queuePath, []);
-
-function archiveEvent(event) {
-  fs.appendFileSync(archivePath, `${JSON.stringify(event)}\n`);
-  if (fs.statSync(archivePath).size > 25 * 1024 * 1024) {
-    const lines = fs.readFileSync(archivePath, 'utf8').trim().split('\n').slice(-100000);
-    fs.writeFileSync(`${archivePath}.tmp`, lines.join('\n') + '\n');
-    fs.renameSync(`${archivePath}.tmp`, archivePath);
-  }
-}
-
-function post(action, data) {
-  const url = `${cfg.base_url.replace(/\/$/, '')}/api.php?action=${action}`;
-  return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }).catch(() => null);
-}
-
-function getPayload() {
-  const url = `${cfg.base_url.replace(/\/$/, '')}/api.php?action=get_monitor_payload&key=${encodeURIComponent(cfg.key)}`;
-  return fetch(url).then(r => r.json()).catch(() => null);
-}
-
-async function flushHistory() {
-  while (historyQueue.length) {
-    const event = historyQueue[0];
-    try {
-      const response = await fetch(`${cfg.base_url.replace(/\/$/, '')}/update_node_1.php`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...event, key: cfg.key })
-      });
-      if (!response.ok) return;
-      const result = await response.json();
-      if (!result.success) return;
-      historyQueue.shift();
-      writeLocal(queuePath, historyQueue);
-    } catch { return; }
-  }
-}
-
-function ping(ip) {
-  return new Promise(resolve => {
-    execFile('ping', ['-c', '1', '-W', '2', ip], err => resolve(!err));
-  });
-}
-
-
-function tcpPort(host, port) {
-  return new Promise(resolve => {
-    const socket = new net.Socket();
-    let done = false;
-    const finish = ok => {
-      if (done) return;
-      done = true;
-      socket.destroy();
-      resolve(ok);
-    };
-    socket.setTimeout(2500);
-    socket.once('connect', () => finish(true));
-    socket.once('timeout', () => finish(false));
-    socket.once('error', () => finish(false));
-    socket.connect(Number(port), host);
-  });
-}
-
-const FALLBACK_PORTS = [80, 443, 8080, 8443, 8728, 8291, 22, 53];
-
-async function tcpFallback(host) {
-  for (const port of FALLBACK_PORTS) {
-    if (await tcpPort(host, port)) return { online: true, port };
-  }
-  return { online: false, port: null };
-}
-function sshPppoe(mk) {
-  return new Promise(resolve => {
-    const args = ['-p', String(mk.ssh_port || 22), mk.password || '', 'ssh', '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=8', `${mk.username}@${mk.host}`, '/ppp active print detail without-paging'];
-    execFile('sshpass', args, { timeout: 15000 }, (err, stdout) => {
-      if (err) return resolve({ error: err.message, clients: [] });
-      const clients = stdout.split(/\r?\n/).map(line => {
-        const user = (line.match(/name="?([^"\s]+)"?/) || [])[1];
-        if (!user) return null;
-        return {
-          username: user,
-          address: (line.match(/address=([^\s]+)/) || [])[1] || null,
-          uptime: (line.match(/uptime=([^\s]+)/) || [])[1] || null,
-          caller_id: (line.match(/caller-id="?([^"\s]+)"?/) || [])[1] || null,
-          service: (line.match(/service=([^\s]+)/) || [])[1] || null
-        };
-      }).filter(Boolean);
-      resolve({ clients });
-    });
-  });
-}
-
-async function tick() {
-  await flushHistory();
-  const payload = await getPayload();
-  if (!payload || !payload.success) return;
-  await post('monitoring_heartbeat', { uid: payload.user.uid, server_ip: payload.user.monitoring_ip || 'monitor' });
-  for (const node of payload.nodes || []) {
-    let online = await ping(node.ip);
-    let detected_port = null;
-    if (!online) {
-      const fallback = await tcpFallback(node.ip);
-      online = fallback.online;
-      detected_port = fallback.port;
-    }
-    const status = online ? 'online' : 'offline';
-    if (nodeState[node.id] !== status) {
-      const event = { id: node.id, uid: payload.user.uid, status, detected_port, checked_at: new Date().toISOString() };
-      historyQueue.push(event);
-      archiveEvent(event);
-      nodeState[node.id] = status;
-      writeLocal(statePath, nodeState);
-      writeLocal(queuePath, historyQueue);
-    } else {
-      await fetch(`${cfg.base_url.replace(/\/$/, '')}/update_node_1.php`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: node.id, status, detected_port, checked_at: new Date().toISOString(), key: cfg.key })
-      }).catch(() => null);
-    }
-  }
-  await flushHistory();
-  const mikrotiks = (payload.mikrotiks || []).filter(mk => mk.password);
-  if ((payload.mikrotiks || []).length && !payload.credentials_allowed) console.log('Credenciais bloqueadas para este IP:', payload.request_ip);
-  for (const mk of mikrotiks) {
-    const result = await sshPppoe(mk);
-    if (result.error) {
-      await post('mikrotik_error', { key: cfg.key, mikrotik_id: mk.id, error: result.error });
-    } else {
-      await post('update_pppoe_clients', { key: cfg.key, mikrotik_id: mk.id, clients: result.clients });
-    }
-  }
-}
-
-tick();
-setInterval(tick, cfg.interval_ms || 30000);
-EOF
-}
-
-create_service() {
-cat > "$SERVICE" <<EOF
+write_service(){
+cat > /etc/systemd/system/nexyra-link.service <<EOF
 [Unit]
-Description=Nexyra Link Monitor
-After=network.target
-
+Description=Nexyra Link Monitor v$VERSION
+Wants=network-online.target
+After=network-online.target
 [Service]
-Type=simple
 WorkingDirectory=$APP_DIR
-ExecStart=/usr/bin/node $APP_DIR/monitor.js
+ExecStart=$(command -v node) $APP_DIR/monitor.js
 Restart=always
 RestartSec=10
-
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload
-systemctl enable nexyra-link
-systemctl restart nexyra-link
+cat > "$APP_DIR/menu.sh" <<'MENU'
+#!/usr/bin/env bash
+printf '1) Status 2) Iniciar 3) Parar 4) Reiniciar 5) Logs 6) Testar API 7) Historico\n'
+read -r -p 'Opcao: ' o
+case "$o" in
+1) systemctl --no-pager status nexyra-link;;2) systemctl start nexyra-link;;3) systemctl stop nexyra-link;;4) systemctl restart nexyra-link;;5) journalctl -u nexyra-link -n 100 -f;;
+6) c=/opt/nexyra-link/config.json;u=$(jq -r .base_url "$c");k=$(jq -r .key "$c");curl -fsS "$u/api.php?action=get_monitor_payload&key=$(printf %s "$k"|jq -sRr @uri)"|jq;;
+7) wc -l /opt/nexyra-link/node-history.jsonl 2>/dev/null||echo 0;;esac
+MENU
+chmod 750 "$APP_DIR/menu.sh"; ln -sf "$APP_DIR/menu.sh" /usr/local/bin/nexyra
+systemctl daemon-reload; systemctl enable --now nexyra-link
 }
 
-need_root
-install_deps
-read_config
-create_monitor
-create_service
-
-echo "Nexyra Link Agent v$VERSION instalado."
-echo "Use: systemctl status nexyra-link"
-echo "As credenciais MikroTik agora vem do banco somente quando o IP deste servidor estiver liberado no app."
-
-
-
-
+install_agent(){ install_deps; configure; [ -d "$APP_DIR" ] && cp -a "$APP_DIR" "/opt/nexyra-link-backup-$(date +%Y%m%d-%H%M%S)" || true; write_monitor; write_service; echo "Nexyra Link v$VERSION instalado. MikroTik via API RouterOS na porta cadastrada. Use: nexyra"; }
+uninstall_agent(){ read -r -p "Remover? [s/N]: " x; [[ "$x" =~ ^[sS]$ ]]||exit; systemctl disable --now nexyra-link 2>/dev/null||true; rm -f /etc/systemd/system/nexyra-link.service /usr/local/bin/nexyra; rm -rf "$APP_DIR"; systemctl daemon-reload; }
+case "${1:-}" in install) install_agent;;uninstall) uninstall_agent;;*) printf 'Nexyra Link v%s\n1) Instalar/atualizar\n2) Desinstalar\n0) Sair\n' "$VERSION";read -r -p "Opcao: " o;case "$o" in 1) install_agent;;2) uninstall_agent;;*) exit;;esac;;esac
