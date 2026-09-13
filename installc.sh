@@ -866,13 +866,18 @@ validate_installation_key() {
     BASE_LINK=${BASE_LINK:-https://api.nexyratech.com.br/netpulse}; BASE_LINK=${BASE_LINK%/}
     read -r -p "Chave de instalacao: " INSTALL_KEY
     [ -n "$INSTALL_KEY" ] || error "Chave obrigatoria"
-    RESPONSE=$(curl -fsS --max-time 20 -H "Content-Type: application/json" -d "$(jq -nc --arg key "$INSTALL_KEY" '{key:$key}')" "$BASE_LINK/validate_key.php") || error "API indisponivel"
-    [ "$(printf '%s' "$RESPONSE" | sed '1s/^\xEF\xBB\xBF//' | jq -r '.success // (.status == "success")')" = "true" ] || error "$(printf '%s' "$RESPONSE" | jq -r '.message // .error // "Chave recusada"')"
+    RESPONSE=$(curl -sS --connect-timeout 8 --max-time 20 -H "Content-Type: application/json" -d "$(jq -nc --arg key "$INSTALL_KEY" '{key:$key}')" "$BASE_LINK/validate_key.php") || error "API indisponivel"
+    RESPONSE=$(printf '%s' "$RESPONSE" | sed -n '/{/,$p')
+    printf '%s' "$RESPONSE" | jq -e . >/dev/null 2>&1 || error "validate_key.php retornou uma resposta que nao e JSON: $RESPONSE"
+    [ "$(printf '%s' "$RESPONSE" | jq -r 'if .success == true or .status == "success" then "true" else "false" end')" = "true" ] || error "$(printf '%s' "$RESPONSE" | jq -r '.message // .error // "Chave recusada"')"
     GET_USERS_API="$BASE_LINK/api.php?action=get_monitor_payload&key=$INSTALL_KEY"
     GET_NODES_API="$GET_USERS_API"
     UPDATE_NODE_API="$BASE_LINK/update_node_1.php"
     UPDATE_SERVER_API="$BASE_LINK/api.php?action=monitoring_heartbeat"
-    curl -fsS --max-time 20 "$GET_USERS_API" | sed '1s/^\xEF\xBB\xBF//' | jq -e '.success == true' >/dev/null || error "Payload recusado"
+    PAYLOAD_RESPONSE=$(curl -sS --connect-timeout 8 --max-time 20 "$GET_USERS_API") || error "Falha ao consultar o payload"
+    PAYLOAD_RESPONSE=$(printf '%s' "$PAYLOAD_RESPONSE" | sed -n '/{/,$p')
+    printf '%s' "$PAYLOAD_RESPONSE" | jq -e . >/dev/null 2>&1 || error "api.php retornou uma resposta que nao e JSON: $PAYLOAD_RESPONSE"
+    [ "$(printf '%s' "$PAYLOAD_RESPONSE" | jq -r '.success // false')" = "true" ] || error "$(printf '%s' "$PAYLOAD_RESPONSE" | jq -r '.message // .error // "Payload recusado"')"
     log "Chave e assinatura validadas"
 }
 
